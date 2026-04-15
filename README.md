@@ -24,7 +24,7 @@ It does **not** use a bot token, local callback server, browser auto-open, or we
 
 ## Redirect URI behavior
 
-The redirect URI configured in Slack must **exactly match** the value used by the CLI through `SLACK_REDIRECT_URI`.
+The redirect URI configured in Slack must **exactly match** the value compiled into the CLI as `slackRedirectURI`.
 
 The CLI does not serve the redirect URI. Instead:
 
@@ -36,12 +36,14 @@ The CLI does not serve the redirect URI. Instead:
 
 The Slack auth code is short-lived, so paste the redirected URL back into the CLI quickly.
 
-## Environment variables
+## OAuth constants
 
-Required for `slackie auth`:
+`slackie auth` uses constants compiled into `main.go`:
 
-- `SLACK_CLIENT_ID`
-- `SLACK_REDIRECT_URI`
+- `slackClientID`
+- `slackRedirectURI`
+
+These are not treated as secrets in this project.
 
 ## Example commands
 

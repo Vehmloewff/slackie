@@ -25,6 +25,8 @@ const (
 	slackAPIBase       = "https://slack.com/api/"
 	configDirName      = "slackie"
 	configFileName     = "config.json"
+	slackClientID      = "10137959977282.10936753440897"
+	slackRedirectURI   = "https://localhost:8998"
 )
 
 var defaultScopes = []string{
@@ -235,14 +237,8 @@ func printHelp() {
 }
 
 func cmdAuth() error {
-	clientID := strings.TrimSpace(os.Getenv("SLACK_CLIENT_ID"))
-	redirectURI := strings.TrimSpace(os.Getenv("SLACK_REDIRECT_URI"))
-	if clientID == "" {
-		return errors.New("SLACK_CLIENT_ID is required")
-	}
-	if redirectURI == "" {
-		return errors.New("SLACK_REDIRECT_URI is required")
-	}
+	clientID := strings.TrimSpace(slackClientID)
+	redirectURI := strings.TrimSpace(slackRedirectURI)
 
 	state, err := randomURLSafe(32)
 	if err != nil {
