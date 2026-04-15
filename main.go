@@ -27,6 +27,8 @@ var defaultScopes = []string{
 	"im:write",
 	"mpim:write",
 	"users:read",
+	"files:read",
+	"files:write",
 }
 
 func main() {
@@ -64,12 +66,11 @@ func run() error {
 		}
 		return runRead(wait)
 	case "send":
-		if len(args) < 3 {
-			return errors.New("usage: slackie send <target> <message>")
+		target, attachments, err := parseSendArgs(args[1:])
+		if err != nil {
+			return err
 		}
-		target := args[1]
-		message := strings.Join(args[2:], " ")
-		return cmdSend(target, message)
+		return cmdSend(target, attachments)
 	default:
 		printHelp()
 		return fmt.Errorf("unknown command: %s", args[0])
@@ -89,6 +90,39 @@ func parseReadArgs(args []string) (bool, error) {
 	return wait, nil
 }
 
+func parseSendArgs(args []string) (string, []string, error) {
+	var target string
+	var attachments []string
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--attach":
+			i++
+			if i >= len(args) || strings.TrimSpace(args[i]) == "" {
+				return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+			}
+			attachments = append(attachments, args[i])
+		case strings.HasPrefix(arg, "--attach="):
+			path := strings.TrimSpace(strings.TrimPrefix(arg, "--attach="))
+			if path == "" {
+				return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+			}
+			attachments = append(attachments, path)
+		default:
+			if target != "" {
+				return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+			}
+			target = arg
+		}
+	}
+
+	if strings.TrimSpace(target) == "" {
+		return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+	}
+	return target, attachments, nil
+}
+
 func printHelp() {
 	fmt.Println("slackie - tiny Slack CLI")
 	fmt.Println()
@@ -97,7 +131,7 @@ func printHelp() {
 	fmt.Println("  slackie unauth")
 	fmt.Println("  slackie read")
 	fmt.Println("  slackie read --wait")
-	fmt.Println("  slackie send <target> <message>")
+	fmt.Println("  slackie send [--attach PATH ...] <target>")
 	fmt.Println("  slackie help")
 	fmt.Println()
 	fmt.Println("read:")
@@ -106,6 +140,11 @@ func printHelp() {
 	fmt.Println("  slackie read --wait")
 	fmt.Println("    Run the normal unread scan first. If none exist, wait for the next")
 	fmt.Println("    newly arrived message, print it, mark it read, and exit.")
+	fmt.Println()
+	fmt.Println("send:")
+	fmt.Println("  slackie send [--attach PATH ...] <target>")
+	fmt.Println("    Read the message body from stdin and send it to the target.")
+	fmt.Println("    Use --attach multiple times to upload local files.")
 	fmt.Println()
 	fmt.Println("Targets:")
 	fmt.Println("  #channel-name")

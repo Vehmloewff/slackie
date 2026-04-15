@@ -22,6 +22,8 @@ Create a Slack app and configure these settings:
   - `im:write`
   - `mpim:write`
   - `users:read`
+  - `files:read`
+  - `files:write`
 
 This CLI uses **user OAuth with PKCE**.
 It does **not** use a bot token, local callback server, browser auto-open, Socket Mode, or websockets.
@@ -56,10 +58,22 @@ slackie auth
 slackie unauth
 slackie read
 slackie read --wait
-slackie send "#backend" "ship it"
-slackie send "@alice" "hello"
-slackie send "#backend:1740000000.123456" "reply in thread"
+printf 'ship it\n' | slackie send "#backend"
+printf 'hello\n' | slackie send "@alice"
+printf 'reply in thread\n' | slackie send "#backend:1740000000.123456"
+printf 'see attached\n' | slackie send --attach ./report.pdf --attach ./chart.png "#backend"
 ```
+
+## `send`
+
+### `slackie send [--attach PATH ...] <target>`
+
+- reads the message body from stdin
+- sends that body to the target conversation
+- `--attach PATH` uploads a local file to the same conversation
+- `--attach` can be specified multiple times
+- if attachments are provided, the stdin body is used as the initial comment on the first uploaded attachment
+- target syntax for threads still works, for example `#backend:1740000000.123456`
 
 ## `unauth`
 
@@ -87,15 +101,17 @@ slackie send "#backend:1740000000.123456" "reply in thread"
 
 The waiting mode uses simple polling with `conversations.history` every few seconds.
 
-## Important scope note for marking messages read
+## Important scope note for marking messages read and handling attachments
 
 This CLI calls `conversations.mark` after printing messages.
-If you want `slackie read` and `slackie read --wait` to successfully mark conversations as read, make sure your Slack app includes these user scopes before installing and authenticating:
+If you want `slackie read` and `slackie read --wait` to successfully mark conversations as read, if you want Slack-uploaded attachments/files to be downloadable from message output, and if you want `slackie send --attach` to upload files, make sure your Slack app includes these user scopes before installing and authenticating:
 
 - `channels:write`
 - `groups:write`
 - `im:write`
 - `mpim:write`
+- `files:read`
+- `files:write`
 
 If you add scopes later, reinstall the app in Slack and run `slackie auth` again so the saved token includes them.
 

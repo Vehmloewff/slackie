@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -146,7 +148,7 @@ func findUserByName(users []user, name string) (user, error) {
 	return matches[0], nil
 }
 
-func cmdSend(target, text string) error {
+func cmdSend(target string, attachmentPaths []string) error {
 	cfg, _, err := loadConfig()
 	if err != nil {
 		return err
@@ -154,21 +156,49 @@ func cmdSend(target, text string) error {
 	client := &SlackClient{HTTPClient: &http.Client{Timeout: 30 * time.Second}, Token: cfg.AccessToken}
 	ctx := context.Background()
 
+	body, err := io.ReadAll(os.Stdin)
+	if err != nil {
+		return fmt.Errorf("read stdin: %w", err)
+	}
+	text := strings.TrimRight(string(body), "\r\n")
+	if strings.TrimSpace(text) == "" && len(attachmentPaths) == 0 {
+		return errors.New("nothing to send: provide stdin message text and/or --attach PATH")
+	}
+
 	convTarget, threadTS := splitThreadTarget(target)
 	convID, display, err := resolveTarget(ctx, client, convTarget)
 	if err != nil {
 		return err
 	}
 
-	resp, err := client.postMessage(ctx, convID, text, threadTS)
-	if err != nil {
-		return err
+	if len(attachmentPaths) == 0 {
+		resp, err := client.postMessage(ctx, convID, text, threadTS)
+		if err != nil {
+			return err
+		}
+		if threadTS != "" {
+			fmt.Printf("sent to %s thread %s (%s)\n", display, threadTS, resp.TS)
+		} else {
+			fmt.Printf("sent to %s (%s)\n", display, resp.TS)
+		}
+		return nil
 	}
 
-	if threadTS != "" {
-		fmt.Printf("sent to %s thread %s (%s)\n", display, threadTS, resp.TS)
-	} else {
-		fmt.Printf("sent to %s (%s)\n", display, resp.TS)
+	remainingComment := text
+	for i, path := range attachmentPaths {
+		comment := ""
+		if i == 0 {
+			comment = remainingComment
+		}
+		resp, err := client.uploadFile(ctx, convID, threadTS, comment, path)
+		if err != nil {
+			return err
+		}
+		if threadTS != "" {
+			fmt.Printf("uploaded %s to %s thread %s (%s)\n", path, display, threadTS, resp.File.ID)
+		} else {
+			fmt.Printf("uploaded %s to %s (%s)\n", path, display, resp.File.ID)
+		}
 	}
 	return nil
 }

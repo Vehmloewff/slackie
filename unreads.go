@@ -176,7 +176,9 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 
 			sortMessagesAsc(visible)
 			item := unreadConversation{Conv: conv, Messages: visible}
-			printUnreadConversation(item, userNames, myUserID)
+			if err := printUnreadConversation(ctx, client, item, userNames, myUserID); err != nil {
+				return fmt.Errorf("print %s: %w", conversationTitle(conv, userNames), err)
+			}
 
 			latestTS := latestMessageTS(visible)
 			if latestTS != "" {
@@ -191,7 +193,9 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 
 func printAndMarkUnread(ctx context.Context, client *SlackClient, unreads []unreadConversation, userNames map[string]string, myUserID string) error {
 	for i, item := range unreads {
-		printUnreadConversation(item, userNames, myUserID)
+		if err := printUnreadConversation(ctx, client, item, userNames, myUserID); err != nil {
+			return fmt.Errorf("print %s: %w", conversationTitle(item.Conv, userNames), err)
+		}
 		latestTS := latestMessageTS(item.Messages)
 		if latestTS != "" {
 			if err := markConversationRead(ctx, client, item.Conv.ID, latestTS); err != nil {
@@ -270,7 +274,7 @@ func latestMessageTS(msgs []message) string {
 	return latest
 }
 
-func printUnreadConversation(item unreadConversation, userNames map[string]string, myUserID string) {
+func printUnreadConversation(ctx context.Context, client *SlackClient, item unreadConversation, userNames map[string]string, myUserID string) error {
 	fmt.Println(conversationHeading(item.Conv, userNames))
 	for _, msg := range item.Messages {
 		when := formatSlackTS(msg.TS)
@@ -280,7 +284,76 @@ func printUnreadConversation(item unreadConversation, userNames map[string]strin
 			text = "(no text)"
 		}
 		fmt.Printf("  %s %s: %s\n", when, sender, text)
+
+		attachmentPaths, err := downloadMessageAttachments(ctx, client, msg)
+		if err != nil {
+			return err
+		}
+		for _, path := range attachmentPaths {
+			fmt.Printf("    %s\n", path)
+		}
 	}
+	return nil
+}
+
+func downloadMessageAttachments(ctx context.Context, client *SlackClient, msg message) ([]string, error) {
+	var out []string
+	seenURLs := map[string]struct{}{}
+
+	download := func(rawURL, suggestedName string) error {
+		rawURL = strings.TrimSpace(rawURL)
+		if rawURL == "" {
+			return nil
+		}
+		if _, ok := seenURLs[rawURL]; ok {
+			return nil
+		}
+		seenURLs[rawURL] = struct{}{}
+
+		path, err := client.downloadToTempFile(ctx, rawURL, suggestedName)
+		if err != nil {
+			if strings.Contains(err.Error(), errAttachmentIsHTML.Error()) {
+				return nil
+			}
+			return err
+		}
+		out = append(out, path)
+		return nil
+	}
+
+	for _, file := range msg.Files {
+		if file.IsExternal {
+			continue
+		}
+		suggestedName := strings.TrimSpace(file.Name)
+		if suggestedName == "" {
+			suggestedName = strings.TrimSpace(file.Title)
+		}
+		preferredURL := strings.TrimSpace(file.URLPrivateDownload)
+		fallbackURL := strings.TrimSpace(file.URLPrivate)
+		if preferredURL == "" {
+			preferredURL, fallbackURL = fallbackURL, ""
+		}
+		if err := download(preferredURL, suggestedName); err != nil {
+			if fallbackURL == "" {
+				return nil, err
+			}
+			if err := download(fallbackURL, suggestedName); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	for _, attachment := range msg.Attachments {
+		suggestedName := strings.TrimSpace(attachment.Title)
+		for _, rawURL := range []string{attachment.ImageURL, attachment.ThumbURL} {
+			if err := download(rawURL, suggestedName); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	return out, nil
 }
 
 func conversationHeading(conv conversation, userNames map[string]string) string {
