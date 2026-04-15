@@ -9,7 +9,7 @@ import (
 
 const (
 	slackClientID    = "10137959977282.10936753440897"
-	slackRedirectURI = "https://localhost:8998"
+	slackRedirectURI = "slackie://callback"
 )
 
 var defaultScopes = []string{
@@ -22,6 +22,10 @@ var defaultScopes = []string{
 	"groups:read",
 	"im:read",
 	"mpim:read",
+	"channels:write",
+	"groups:write",
+	"im:write",
+	"mpim:write",
 	"users:read",
 }
 
@@ -48,12 +52,17 @@ func run() error {
 			return errors.New("usage: slackie auth")
 		}
 		return cmdAuth()
-	case "unreads":
-		wait, err := parseUnreadsArgs(args[1:])
+	case "unauth":
+		if len(args) != 1 {
+			return errors.New("usage: slackie unauth")
+		}
+		return cmdUnauth()
+	case "read":
+		wait, err := parseReadArgs(args[1:])
 		if err != nil {
 			return err
 		}
-		return runUnreads(wait)
+		return runRead(wait)
 	case "send":
 		if len(args) < 3 {
 			return errors.New("usage: slackie send <target> <message>")
@@ -67,14 +76,14 @@ func run() error {
 	}
 }
 
-func parseUnreadsArgs(args []string) (bool, error) {
+func parseReadArgs(args []string) (bool, error) {
 	wait := false
 	for _, arg := range args {
 		switch arg {
 		case "--wait":
 			wait = true
 		default:
-			return false, fmt.Errorf("usage: slackie unreads [--wait]")
+			return false, fmt.Errorf("usage: slackie read [--wait]")
 		}
 	}
 	return wait, nil
@@ -85,15 +94,16 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println("Usage:")
 	fmt.Println("  slackie auth")
-	fmt.Println("  slackie unreads")
-	fmt.Println("  slackie unreads --wait")
+	fmt.Println("  slackie unauth")
+	fmt.Println("  slackie read")
+	fmt.Println("  slackie read --wait")
 	fmt.Println("  slackie send <target> <message>")
 	fmt.Println("  slackie help")
 	fmt.Println()
-	fmt.Println("unreads:")
-	fmt.Println("  slackie unreads")
+	fmt.Println("read:")
+	fmt.Println("  slackie read")
 	fmt.Println("    List unread conversations, mark them read, and exit.")
-	fmt.Println("  slackie unreads --wait")
+	fmt.Println("  slackie read --wait")
 	fmt.Println("    Run the normal unread scan first. If none exist, wait for the next")
 	fmt.Println("    newly arrived message, print it, mark it read, and exit.")
 	fmt.Println()

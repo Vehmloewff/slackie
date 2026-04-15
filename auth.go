@@ -297,6 +297,22 @@ func saveConfig(cfg Config) (string, error) {
 	return path, nil
 }
 
+func cmdUnauth() error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			fmt.Printf("No auth config found at %s\n", path)
+			return nil
+		}
+		return fmt.Errorf("remove config: %w", err)
+	}
+	fmt.Printf("Removed auth config: %s\n", path)
+	return nil
+}
+
 func configPath() (string, error) {
 	dir, err := os.UserConfigDir()
 	if err != nil {
