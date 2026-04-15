@@ -17,6 +17,10 @@ Create a Slack app and configure these settings:
   - `groups:read`
   - `im:read`
   - `mpim:read`
+  - `channels:write`
+  - `groups:write`
+  - `im:write`
+  - `mpim:write`
   - `users:read`
 
 This CLI uses **user OAuth with PKCE**.
@@ -49,23 +53,32 @@ These are not treated as secrets in this project.
 
 ```sh
 slackie auth
-slackie unreads
-slackie unreads --wait
+slackie unauth
+slackie read
+slackie read --wait
 slackie send "#backend" "ship it"
 slackie send "@alice" "hello"
 slackie send "#backend:1740000000.123456" "reply in thread"
 ```
 
-## `unreads`
+## `unauth`
 
-### `slackie unreads`
+### `slackie unauth`
+
+- removes the saved local auth config file
+- does not revoke the Slack token remotely
+- use `slackie auth` again to sign in again later
+
+## `read`
+
+### `slackie read`
 
 - lists unread conversations
 - prints the unread messages it fetched
 - marks them read
 - exits
 
-### `slackie unreads --wait`
+### `slackie read --wait`
 
 - first runs the normal unread scan
 - if unread messages already exist, it prints them, marks them read, and exits immediately
@@ -73,6 +86,18 @@ slackie send "#backend:1740000000.123456" "reply in thread"
 - when that first new message arrives, it prints it in the same style, marks that conversation read at the latest printed message timestamp, and exits immediately
 
 The waiting mode uses simple polling with `conversations.history` every few seconds.
+
+## Important scope note for marking messages read
+
+This CLI calls `conversations.mark` after printing messages.
+If you want `slackie read` and `slackie read --wait` to successfully mark conversations as read, make sure your Slack app includes these user scopes before installing and authenticating:
+
+- `channels:write`
+- `groups:write`
+- `im:write`
+- `mpim:write`
+
+If you add scopes later, reinstall the app in Slack and run `slackie auth` again so the saved token includes them.
 
 ## Local config
 

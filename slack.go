@@ -87,6 +87,12 @@ type responseMeta struct {
 	NextCursor string `json:"next_cursor"`
 }
 
+type conversationInfoResponse struct {
+	OK      bool         `json:"ok"`
+	Error   string       `json:"error"`
+	Channel conversation `json:"channel"`
+}
+
 type conversationsOpenResponse struct {
 	OK      bool         `json:"ok"`
 	Error   string       `json:"error"`
@@ -159,6 +165,16 @@ func (c *SlackClient) listUsers(ctx context.Context) ([]user, error) {
 		}
 	}
 	return all, nil
+}
+
+func (c *SlackClient) getConversationInfo(ctx context.Context, channelID string) (conversation, error) {
+	params := url.Values{}
+	params.Set("channel", channelID)
+	var out conversationInfoResponse
+	if err := c.apiGet(ctx, "conversations.info", params, &out); err != nil {
+		return conversation{}, err
+	}
+	return out.Channel, nil
 }
 
 func fetchConversationHistory(ctx context.Context, client *SlackClient, channelID string, opts HistoryOptions) ([]message, error) {

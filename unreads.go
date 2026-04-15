@@ -17,7 +17,7 @@ type unreadConversation struct {
 	Messages []message
 }
 
-func runUnreads(wait bool) error {
+func runRead(wait bool) error {
 	cfg, _, err := loadConfig()
 	if err != nil {
 		return err
@@ -45,7 +45,6 @@ func runUnreads(wait bool) error {
 		return printAndMarkUnread(ctx, client, unreads, userNames, cfg.UserID)
 	}
 	if !wait {
-		fmt.Println("No unread conversations.")
 		return nil
 	}
 
@@ -60,24 +59,34 @@ func runUnreads(wait bool) error {
 
 func findUnreadConversations(ctx context.Context, client *SlackClient, convs []conversation) ([]unreadConversation, map[string][]message, error) {
 	var out []unreadConversation
-	recentByConversation := make(map[string][]message)
+	recentByConversation := make(map[string][]message, len(convs))
 
 	for _, conv := range convs {
-		if !looksUnread(conv) {
-			continue
+		conv, err := hydrateConversationReadState(ctx, client, conv)
+		if err != nil {
+			return nil, nil, fmt.Errorf("load conversation info for %s: %w", conversationTitle(conv, nil), err)
 		}
 
-		msgs, err := fetchConversationHistory(ctx, client, conv.ID, HistoryOptions{
-			Oldest: conv.LastRead,
-			Limit:  12,
-		})
+		msgs, err := fetchConversationHistory(ctx, client, conv.ID, HistoryOptions{Limit: 12})
 		if err != nil {
 			return nil, nil, fmt.Errorf("history for %s: %w", conversationTitle(conv, nil), err)
 		}
 		recentByConversation[conv.ID] = msgs
 
 		visible := filterVisibleMessages(msgs)
-		visible = unreadTail(visible, conv.LastRead)
+		if len(visible) == 0 {
+			continue
+		}
+
+		if isSlackTS(conv.LastRead) {
+			visible = unreadTail(visible, conv.LastRead)
+		} else if looksUnread(conv) {
+			if len(visible) > 5 {
+				visible = visible[:5]
+			}
+		} else {
+			continue
+		}
 		if len(visible) == 0 {
 			continue
 		}
@@ -92,10 +101,40 @@ func findUnreadConversations(ctx context.Context, client *SlackClient, convs []c
 	return out, recentByConversation, nil
 }
 
+func hydrateConversationReadState(ctx context.Context, client *SlackClient, conv conversation) (conversation, error) {
+	if conv.LastRead != "" && conv.Latest != nil && conv.Latest.TS != "" {
+		return conv, nil
+	}
+
+	info, err := client.getConversationInfo(ctx, conv.ID)
+	if err != nil {
+		return conv, err
+	}
+	if conv.LastRead == "" {
+		conv.LastRead = info.LastRead
+	}
+	if conv.Latest == nil || conv.Latest.TS == "" {
+		conv.Latest = info.Latest
+	}
+	if conv.UnreadCount == 0 {
+		conv.UnreadCount = info.UnreadCount
+	}
+	if conv.UnreadCountDisplay == 0 {
+		conv.UnreadCountDisplay = info.UnreadCountDisplay
+	}
+	if conv.User == "" {
+		conv.User = info.User
+	}
+	if conv.Name == "" {
+		conv.Name = info.Name
+	}
+	return conv, nil
+}
+
 func buildBaselines(ctx context.Context, client *SlackClient, convs []conversation, recentByConversation map[string][]message) (map[string]string, error) {
 	baselines := make(map[string]string, len(convs))
 	for _, conv := range convs {
-		if msgs := recentByConversation[conv.ID]; len(msgs) > 0 {
+		if msgs, ok := recentByConversation[conv.ID]; ok {
 			baselines[conv.ID] = latestMessageTS(msgs)
 			continue
 		}
@@ -142,9 +181,8 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 			latestTS := latestMessageTS(visible)
 			if latestTS != "" {
 				if err := markConversationRead(ctx, client, conv.ID, latestTS); err != nil {
-					return fmt.Errorf("mark read for %s: %w", conversationTitle(conv, nil), err)
+					return fmt.Errorf("mark read for %s: %w", conversationTitle(conv, userNames), err)
 				}
-				fmt.Println("marked read")
 			}
 			return nil
 		}
@@ -157,9 +195,7 @@ func printAndMarkUnread(ctx context.Context, client *SlackClient, unreads []unre
 		latestTS := latestMessageTS(item.Messages)
 		if latestTS != "" {
 			if err := markConversationRead(ctx, client, item.Conv.ID, latestTS); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: mark read failed for %s: %v\n", conversationTitle(item.Conv, userNames), err)
-			} else {
-				fmt.Println("marked read")
+				return fmt.Errorf("mark read for %s: %w", conversationTitle(item.Conv, userNames), err)
 			}
 		}
 		if i != len(unreads)-1 {
