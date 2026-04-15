@@ -6,23 +6,21 @@ Tiny Slack CLI for auth, reading unreads, and sending messages.
 
 Download the binary for your platform from the [GitHub Releases page](https://github.com/Vehmloewff/slackie/releases), make it executable, and put it on your `PATH`.
 
-## Getting started
-
-Before authenticating, configure your Slack app as described in [configuring_slack_app.md](./configuring_slack_app.md).
+## Usage
 
 ```sh
 slackie auth
 slackie read
 slackie read --wait
-printf 'ship it\n' | slackie send "#backend"
-printf 'hello\n' | slackie send "@alice"
-printf 'reply in thread\n' | slackie send "#backend:1740000000.123456"
-printf 'reply in thread\n' | slackie send "C12345678:1740000000.123456"
-printf 'see attached\n' | slackie send --attach ./report.pdf "#backend"
+printf 'ship it' | slackie send "#backend"
+printf 'hello' | slackie send "@alice"
+printf 'reply in thread' | slackie send "#backend:1740000000.123456"
+printf 'reply in thread' | slackie send "C12345678:1740000000.123456"
+printf 'see attached' | slackie send --attach ./report.pdf "#backend"
 slackie unauth
 ```
 
-## Commands
+### Commands
 
 - `slackie auth` — sign in
 - `slackie read` — print unread messages, including per-message thread reply targets, and mark them read
