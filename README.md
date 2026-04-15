@@ -17,6 +17,7 @@ slackie read --wait
 printf 'ship it\n' | slackie send "#backend"
 printf 'hello\n' | slackie send "@alice"
 printf 'reply in thread\n' | slackie send "#backend:1740000000.123456"
+printf 'reply in thread\n' | slackie send "C12345678:1740000000.123456"
 printf 'see attached\n' | slackie send --attach ./report.pdf "#backend"
 slackie unauth
 ```
@@ -24,7 +25,7 @@ slackie unauth
 ## Commands
 
 - `slackie auth` — sign in
-- `slackie read` — print unread messages and mark them read
+- `slackie read` — print unread messages, including per-message thread reply targets, and mark them read
 - `slackie read --wait` — wait for the next message if nothing is unread
 - `slackie send [--attach PATH ...] <target>` — send stdin to a channel, DM, or thread
 - `slackie unauth` — remove saved local auth state

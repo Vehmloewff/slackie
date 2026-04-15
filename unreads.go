@@ -284,6 +284,9 @@ func printUnreadConversation(ctx context.Context, client *SlackClient, item unre
 			text = "(no text)"
 		}
 		fmt.Printf("  %s %s: %s\n", when, sender, text)
+		if target := replyTarget(item.Conv, msg); target != "" {
+			fmt.Printf("    reply target: %s\n", target)
+		}
 
 		attachmentPaths, err := downloadMessageAttachments(ctx, client, msg)
 		if err != nil {
@@ -294,6 +297,17 @@ func printUnreadConversation(ctx context.Context, client *SlackClient, item unre
 		}
 	}
 	return nil
+}
+
+func replyTarget(conv conversation, msg message) string {
+	threadTS := strings.TrimSpace(msg.ThreadTS)
+	if !isSlackTS(threadTS) {
+		threadTS = strings.TrimSpace(msg.TS)
+	}
+	if conv.ID == "" || !isSlackTS(threadTS) {
+		return ""
+	}
+	return conv.ID + ":" + threadTS
 }
 
 func downloadMessageAttachments(ctx context.Context, client *SlackClient, msg message) ([]string, error) {
