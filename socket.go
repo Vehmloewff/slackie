@@ -46,7 +46,7 @@ type socketModeEvent struct {
 }
 
 func socketModeAppToken(cfg Config) string {
-	if token := strings.TrimSpace(os.Getenv("SLACKER_APP_TOKEN")); token != "" {
+	if token := strings.TrimSpace(os.Getenv("SLACKIE_APP_TOKEN")); token != "" {
 		return token
 	}
 	return strings.TrimSpace(cfg.AppToken)

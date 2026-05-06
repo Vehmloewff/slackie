@@ -21,7 +21,7 @@ import (
 const (
 	slackAuthorizeURL  = "https://slack.com/oauth/v2/authorize"
 	slackOAuthTokenURL = "https://slack.com/api/oauth.v2.access"
-	configDirName      = "slacker"
+	configDirName      = "slackie"
 	configFileName     = "config.json"
 )
 
@@ -79,9 +79,9 @@ func cmdAuth() error {
 	if err != nil {
 		return err
 	}
-	appToken := strings.TrimSpace(os.Getenv("SLACKER_APP_TOKEN"))
+	appToken := strings.TrimSpace(os.Getenv("SLACKIE_APP_TOKEN"))
 	if appToken == "" {
-		return errors.New("missing Slack app-level token; set SLACKER_APP_TOKEN=xapp-... when running slacker auth")
+		return errors.New("missing Slack app-level token; set SLACKIE_APP_TOKEN=xapp-... when running slackie auth")
 	}
 
 	state, err := randomURLSafe(32)
@@ -227,15 +227,15 @@ func cmdAuth() error {
 }
 
 func authSettings() (clientID, redirectURI string, err error) {
-	clientID = strings.TrimSpace(os.Getenv("SLACKER_CLIENT_ID"))
+	clientID = strings.TrimSpace(os.Getenv("SLACKIE_CLIENT_ID"))
 	if clientID == "" {
 		clientID = strings.TrimSpace(slackClientID)
 	}
 	if clientID == "" {
-		return "", "", errors.New("missing Slack app client ID; set SLACKER_CLIENT_ID to the Client ID from your Slack app's Basic Information page")
+		return "", "", errors.New("missing Slack app client ID; set SLACKIE_CLIENT_ID to the Client ID from your Slack app's Basic Information page")
 	}
 
-	redirectURI = strings.TrimSpace(os.Getenv("SLACKER_REDIRECT_URI"))
+	redirectURI = strings.TrimSpace(os.Getenv("SLACKIE_REDIRECT_URI"))
 	if redirectURI == "" {
 		redirectURI = strings.TrimSpace(slackRedirectURI)
 	}
@@ -247,7 +247,7 @@ func authSettings() (clientID, redirectURI string, err error) {
 		return "", "", fmt.Errorf("invalid Slack redirect URI %q", redirectURI)
 	}
 	if parsedRedirectURI.Scheme != "https" {
-		return "", "", fmt.Errorf("Slack bot scopes require an HTTPS web redirect URI; remove SLACKER_REDIRECT_URI or set it to an HTTPS URL registered in Slack, e.g. %s", slackRedirectURI)
+		return "", "", fmt.Errorf("Slack bot scopes require an HTTPS web redirect URI; remove SLACKIE_REDIRECT_URI or set it to an HTTPS URL registered in Slack, e.g. %s", slackRedirectURI)
 	}
 	return clientID, redirectURI, nil
 }
@@ -298,7 +298,7 @@ func exchangeOAuthCode(ctx context.Context, httpClient *http.Client, clientID, r
 	form.Set("code", code)
 	form.Set("redirect_uri", redirectURI)
 	form.Set("code_verifier", verifier)
-	if clientSecret := strings.TrimSpace(os.Getenv("SLACKER_CLIENT_SECRET")); clientSecret != "" {
+	if clientSecret := strings.TrimSpace(os.Getenv("SLACKIE_CLIENT_SECRET")); clientSecret != "" {
 		form.Set("client_secret", clientSecret)
 	}
 
@@ -338,7 +338,7 @@ func loadConfig() (Config, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Config{}, path, fmt.Errorf("no config found at %s; run: slacker auth", path)
+			return Config{}, path, fmt.Errorf("no config found at %s; run: slackie auth", path)
 		}
 		return Config{}, path, fmt.Errorf("read config: %w", err)
 	}
@@ -347,7 +347,7 @@ func loadConfig() (Config, string, error) {
 		return Config{}, path, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if strings.TrimSpace(cfg.AccessToken) == "" && strings.TrimSpace(cfg.BotAccessToken) == "" && strings.TrimSpace(cfg.UserAccessToken) == "" {
-		return Config{}, path, fmt.Errorf("config %s does not contain an access token; run: slacker auth", path)
+		return Config{}, path, fmt.Errorf("config %s does not contain an access token; run: slackie auth", path)
 	}
 	return cfg, path, nil
 }
