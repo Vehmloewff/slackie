@@ -1,79 +1,26 @@
-# Configuring your Slack app
+# Configuring the Slack App
 
-`slackie` uses **user OAuth with PKCE**.
-It does **not** use a bot token or a local callback server.
+`slacker` uses Slack OAuth with PKCE. It requests **Bot Token Scopes** via Slack's `scope` authorize parameter for app messages, plus `users:read` via `user_scope` for user-name lookup.
 
-## 1. Create a Slack app
+1. Create a Slack App at <https://api.slack.com/apps>.
+2. In **OAuth & Permissions**, add this redirect URL exactly:
 
-Create an app in your Slack workspace and open **OAuth & Permissions**.
-
-## 2. Add the redirect URL
-
-Add this redirect URL exactly:
-
-```text
-slackie://callback
-```
-
-The redirect URI must match exactly.
-
-## 3. Add required user token scopes
-
-Add these **User Token Scopes**:
-
-### Messaging
-
-- `chat:write`
-
-### Reading conversations and messages
-
-- `channels:history`
-- `groups:history`
-- `im:history`
-- `mpim:history`
-- `channels:read`
-- `groups:read`
-- `im:read`
-- `mpim:read`
-
-### Marking conversations read
-
-- `channels:write`
-- `groups:write`
-- `im:write`
-- `mpim:write`
-
-### User lookup
-
-- `users:read`
-
-### File access
-
-- `files:read`
-- `files:write`
-
-## 4. Install or reinstall the app
-
-Install the app to your workspace.
-If you change scopes later, reinstall the app and run `slackie auth` again.
-
-## PKCE flow
-
-`slackie auth` uses the OAuth authorization code flow with PKCE:
-
-1. Run:
-   ```sh
-   slackie auth
+   ```text
+   https://example.com/slacker/callback
    ```
-2. The CLI prints a Slack authorization URL.
-3. Open that URL in your browser and approve access.
-4. Slack redirects to `slackie://callback?...`.
-5. Copy the **full final redirected URL** from your browser.
-6. Paste that full URL back into the CLI.
+
+3. In **OAuth & Permissions**, add the bot token scopes and user token scopes from `README.md`.
+4. For reliable `read --wait`, enable **Socket Mode**, create an app-level token with `connections:write`, and subscribe to the bot events `app_mention`, `message.im`, and optionally `message.mpim`.
+5. Run:
+
+   ```sh
+   SLACKER_CLIENT_ID=<client-id> slacker auth
+   ```
+
+6. After approving access, Slack redirects to `https://example.com/slacker/callback?...`. That's OK. Copy the full final URL from the address bar and paste it back into the terminal.
+7. Run `SLACKER_APP_TOKEN=xapp-... slacker auth` once to save the app-level token, then use Socket Mode waits with `slacker read --wait`.
 
 Notes:
 
-- The CLI does not open a browser for you.
-- The CLI does not listen on a localhost callback port.
-- The authorization code is short-lived, so paste the redirected URL back promptly.
-- This flow is for a **user token**, not a bot token.
+- If you use a different web redirect URI, add that exact URI in Slack and set `SLACKER_REDIRECT_URI` too.
+- This flow does not use a local callback server.

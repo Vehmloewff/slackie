@@ -420,7 +420,7 @@ func (c *SlackClient) downloadToTempFile(ctx context.Context, rawURL, suggestedN
 	}
 
 	suffix := attachmentTempSuffix(finalURL, suggestedName)
-	file, err := os.CreateTemp("", "slackie-attachment-*"+suffix)
+	file, err := os.CreateTemp("", "slacker-attachment-*"+suffix)
 	if err != nil {
 		return "", fmt.Errorf("create temp attachment file: %w", err)
 	}
@@ -513,6 +513,11 @@ func (c *SlackClient) doJSON(req *http.Request, method string, out interface{}) 
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
+		return fmt.Errorf("%s failed: http %d: retry after %s: %s", method, resp.StatusCode, retryAfter, strings.TrimSpace(string(body)))
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
 		return fmt.Errorf("%s failed: http %d: %s", method, resp.StatusCode, strings.TrimSpace(string(body)))

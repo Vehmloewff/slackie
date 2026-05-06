@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const unreadPollInterval = 3 * time.Second
+const unreadPollInterval = 15 * time.Second
 
 type unreadConversation struct {
 	Conv     conversation
@@ -22,8 +22,11 @@ func runRead(wait bool) error {
 	if err != nil {
 		return err
 	}
+	if cfg.LastSeen == nil {
+		cfg.LastSeen = map[string]string{}
+	}
 
-	client := &SlackClient{HTTPClient: &http.Client{Timeout: 30 * time.Second}, Token: cfg.AccessToken}
+	client := &SlackClient{HTTPClient: &http.Client{Timeout: 30 * time.Second}, Token: readAccessToken(cfg)}
 	ctx := context.Background()
 
 	users, err := client.listUsers(ctx)
@@ -37,57 +40,59 @@ func runRead(wait bool) error {
 		return fmt.Errorf("load conversations: %w", err)
 	}
 
-	unreads, recentByConversation, err := findUnreadConversations(ctx, client, convs)
+	unreads, err := findUnreadConversations(ctx, client, convs, &cfg)
 	if err != nil {
 		return err
 	}
+	myUserID := mentionUserID(cfg)
 	if len(unreads) > 0 {
-		return printAndMarkUnread(ctx, client, unreads, userNames, cfg.UserID)
+		if err := printAndRememberUnread(ctx, client, unreads, userNames, myUserID, &cfg); err != nil {
+			return err
+		}
+		_, err := saveConfig(cfg)
+		return err
 	}
 	if !wait {
-		return nil
-	}
-
-	baselines, err := buildBaselines(ctx, client, convs, recentByConversation)
-	if err != nil {
+		_, err := saveConfig(cfg)
 		return err
 	}
 
-	fmt.Println("No unread messages. Waiting for the next message...")
-	return waitForNextMessage(ctx, client, convs, baselines, userNames, cfg.UserID)
+	fmt.Println("No unread DMs or mentions. Waiting for the next message...")
+	appToken := socketModeAppToken(cfg)
+	if appToken == "" {
+		return fmt.Errorf("slacker read --wait requires a Slack app-level token; set SLACKER_APP_TOKEN=xapp-... and re-run slacker auth")
+	}
+	if err := waitForSocketModeMessage(ctx, client, appToken, userNames, myUserID, &cfg); err != nil {
+		return err
+	}
+	_, err = saveConfig(cfg)
+	return err
 }
 
-func findUnreadConversations(ctx context.Context, client *SlackClient, convs []conversation) ([]unreadConversation, map[string][]message, error) {
+func findUnreadConversations(ctx context.Context, client *SlackClient, convs []conversation, cfg *Config) ([]unreadConversation, error) {
 	var out []unreadConversation
-	recentByConversation := make(map[string][]message, len(convs))
 
 	for _, conv := range convs {
-		conv, err := hydrateConversationReadState(ctx, client, conv)
-		if err != nil {
-			return nil, nil, fmt.Errorf("load conversation info for %s: %w", conversationTitle(conv, nil), err)
+		baseline := bestBaseline(conv, cfg.LastSeen[conv.ID])
+		if baseline == "" {
+			// First run for this token: avoid dumping history and avoid one
+			// conversations.history request per channel. Use Slack's latest marker as
+			// our high-water mark; newly arriving messages will be fetched later.
+			rememberConversationLatest(cfg, conv)
+			continue
 		}
-
-		msgs, err := fetchConversationHistory(ctx, client, conv.ID, HistoryOptions{Limit: 12})
-		if err != nil {
-			return nil, nil, fmt.Errorf("history for %s: %w", conversationTitle(conv, nil), err)
-		}
-		recentByConversation[conv.ID] = msgs
-
-		visible := filterVisibleMessages(msgs)
-		if len(visible) == 0 {
+		if !conversationMayHaveNewMessages(conv, baseline) {
 			continue
 		}
 
-		if isSlackTS(conv.LastRead) {
-			visible = unreadTail(visible, conv.LastRead)
-		} else if looksUnread(conv) {
-			if len(visible) > 5 {
-				visible = visible[:5]
-			}
-		} else {
-			continue
+		msgs, err := fetchConversationHistory(ctx, client, conv.ID, HistoryOptions{Oldest: baseline, Limit: 50})
+		if err != nil {
+			return nil, fmt.Errorf("history for %s: %w", conversationTitle(conv, nil), err)
 		}
+
+		visible := relevantUnreadMessages(conv, msgs, cfg.UserID)
 		if len(visible) == 0 {
+			rememberLatest(cfg, conv.ID, msgs)
 			continue
 		}
 
@@ -98,7 +103,17 @@ func findUnreadConversations(ctx context.Context, client *SlackClient, convs []c
 	sort.Slice(out, func(i, j int) bool {
 		return latestMessageTS(out[i].Messages) < latestMessageTS(out[j].Messages)
 	})
-	return out, recentByConversation, nil
+	return out, nil
+}
+
+func bestBaseline(conv conversation, lastSeen string) string {
+	if isSlackTS(lastSeen) {
+		return lastSeen
+	}
+	if isSlackTS(conv.LastRead) {
+		return conv.LastRead
+	}
+	return ""
 }
 
 func hydrateConversationReadState(ctx context.Context, client *SlackClient, conv conversation) (conversation, error) {
@@ -131,32 +146,36 @@ func hydrateConversationReadState(ctx context.Context, client *SlackClient, conv
 	return conv, nil
 }
 
-func buildBaselines(ctx context.Context, client *SlackClient, convs []conversation, recentByConversation map[string][]message) (map[string]string, error) {
-	baselines := make(map[string]string, len(convs))
+func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conversation, userNames map[string]string, myUserID string, cfg *Config) error {
 	for _, conv := range convs {
-		if msgs, ok := recentByConversation[conv.ID]; ok {
-			baselines[conv.ID] = latestMessageTS(msgs)
-			continue
+		if cfg.LastSeen[conv.ID] == "" {
+			rememberConversationLatest(cfg, conv)
 		}
-
-		msgs, err := fetchConversationHistory(ctx, client, conv.ID, HistoryOptions{Limit: 1})
-		if err != nil {
-			return nil, fmt.Errorf("build baseline for %s: %w", conversationTitle(conv, nil), err)
-		}
-		baselines[conv.ID] = latestMessageTS(msgs)
 	}
-	return baselines, nil
-}
 
-func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conversation, baselines map[string]string, userNames map[string]string, myUserID string) error {
 	for {
 		time.Sleep(unreadPollInterval)
 
-		for _, conv := range convs {
-			msgs, err := fetchConversationHistory(ctx, client, conv.ID, HistoryOptions{
-				Oldest: baselines[conv.ID],
-				Limit:  12,
-			})
+		freshConvs, err := client.listAllConversations(ctx)
+		if err != nil {
+			if isFatalSlackError(err) {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "warning: poll conversations failed: %v\n", err)
+			continue
+		}
+
+		for _, conv := range freshConvs {
+			baseline := cfg.LastSeen[conv.ID]
+			if baseline == "" {
+				rememberConversationLatest(cfg, conv)
+				continue
+			}
+			if !conversationMayHaveNewMessages(conv, baseline) {
+				continue
+			}
+
+			msgs, err := fetchConversationHistory(ctx, client, conv.ID, HistoryOptions{Oldest: baseline, Limit: 12})
 			if err != nil {
 				if isFatalSlackError(err) {
 					return err
@@ -165,11 +184,12 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 				continue
 			}
 			if len(msgs) == 0 {
+				rememberConversationLatest(cfg, conv)
 				continue
 			}
 
-			baselines[conv.ID] = latestMessageTS(msgs)
-			visible := filterVisibleMessages(msgs)
+			visible := relevantUnreadMessages(conv, msgs, myUserID)
+			rememberLatest(cfg, conv.ID, msgs)
 			if len(visible) == 0 {
 				continue
 			}
@@ -179,29 +199,17 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 			if err := printUnreadConversation(ctx, client, item, userNames, myUserID); err != nil {
 				return fmt.Errorf("print %s: %w", conversationTitle(conv, userNames), err)
 			}
-
-			latestTS := latestMessageTS(visible)
-			if latestTS != "" {
-				if err := markConversationRead(ctx, client, conv.ID, latestTS); err != nil {
-					return fmt.Errorf("mark read for %s: %w", conversationTitle(conv, userNames), err)
-				}
-			}
 			return nil
 		}
 	}
 }
 
-func printAndMarkUnread(ctx context.Context, client *SlackClient, unreads []unreadConversation, userNames map[string]string, myUserID string) error {
+func printAndRememberUnread(ctx context.Context, client *SlackClient, unreads []unreadConversation, userNames map[string]string, myUserID string, cfg *Config) error {
 	for i, item := range unreads {
 		if err := printUnreadConversation(ctx, client, item, userNames, myUserID); err != nil {
 			return fmt.Errorf("print %s: %w", conversationTitle(item.Conv, userNames), err)
 		}
-		latestTS := latestMessageTS(item.Messages)
-		if latestTS != "" {
-			if err := markConversationRead(ctx, client, item.Conv.ID, latestTS); err != nil {
-				return fmt.Errorf("mark read for %s: %w", conversationTitle(item.Conv, userNames), err)
-			}
-		}
+		rememberLatest(cfg, item.Conv.ID, item.Messages)
 		if i != len(unreads)-1 {
 			fmt.Println()
 		}
@@ -209,17 +217,47 @@ func printAndMarkUnread(ctx context.Context, client *SlackClient, unreads []unre
 	return nil
 }
 
-func looksUnread(conv conversation) bool {
-	if conv.UnreadCountDisplay > 0 || conv.UnreadCount > 0 {
-		return true
+func rememberLatest(cfg *Config, channelID string, msgs []message) {
+	if cfg.LastSeen == nil {
+		cfg.LastSeen = map[string]string{}
 	}
-	if conv.LastRead == "" && conv.Latest != nil && conv.Latest.TS != "" {
-		return true
+	latest := latestMessageTS(msgs)
+	if latest != "" && slackTSGreater(latest, cfg.LastSeen[channelID]) {
+		cfg.LastSeen[channelID] = latest
 	}
-	if conv.Latest != nil && isSlackTS(conv.LastRead) && isSlackTS(conv.Latest.TS) {
-		return slackTSGreater(conv.Latest.TS, conv.LastRead)
+}
+
+func rememberConversationLatest(cfg *Config, conv conversation) {
+	if cfg.LastSeen == nil {
+		cfg.LastSeen = map[string]string{}
 	}
-	return false
+	if conv.Latest != nil && isSlackTS(conv.Latest.TS) && slackTSGreater(conv.Latest.TS, cfg.LastSeen[conv.ID]) {
+		cfg.LastSeen[conv.ID] = conv.Latest.TS
+	}
+}
+
+func conversationMayHaveNewMessages(conv conversation, baseline string) bool {
+	if conv.Latest != nil && isSlackTS(conv.Latest.TS) {
+		return slackTSGreater(conv.Latest.TS, baseline)
+	}
+	return conv.UnreadCount > 0 || conv.UnreadCountDisplay > 0
+}
+
+func relevantUnreadMessages(conv conversation, in []message, myUserID string) []message {
+	out := make([]message, 0, len(in))
+	for _, msg := range filterVisibleMessages(in) {
+		if msg.User == myUserID || (myUserID != "" && strings.Contains(msg.Text, "<@"+myUserID+">") && msg.User == myUserID) {
+			continue
+		}
+		if conv.IsIM || conv.IsMPIM {
+			out = append(out, msg)
+			continue
+		}
+		if myUserID != "" && strings.Contains(msg.Text, "<@"+myUserID+">") {
+			out = append(out, msg)
+		}
+	}
+	return out
 }
 
 func filterVisibleMessages(in []message) []message {
@@ -232,28 +270,6 @@ func filterVisibleMessages(in []message) []message {
 			continue
 		}
 		out = append(out, msg)
-	}
-	return out
-}
-
-func unreadTail(msgs []message, lastRead string) []message {
-	if len(msgs) == 0 {
-		return msgs
-	}
-	if lastRead == "" || !isSlackTS(lastRead) {
-		if len(msgs) > 5 {
-			return msgs[:5]
-		}
-		return msgs
-	}
-	var out []message
-	for _, msg := range msgs {
-		if isSlackTS(msg.TS) && slackTSGreater(msg.TS, lastRead) {
-			out = append(out, msg)
-		}
-	}
-	if len(out) > 8 {
-		out = out[:8]
 	}
 	return out
 }
