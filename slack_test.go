@@ -86,3 +86,26 @@ func TestMessageThreadingTargetUsesConversationTitle(t *testing.T) {
 		t.Fatalf("messageThreadingTarget = %q, want %q", got, want)
 	}
 }
+
+func TestReadableUserMentions(t *testing.T) {
+	got := readableUserMentions("hi <@U123> and <@W456|old>", map[string]string{
+		"U123": "alice",
+		"W456": "Alice Baker",
+	})
+	want := "hi <@alice> and <@Alice Baker>"
+	if got != want {
+		t.Fatalf("readableUserMentions = %q, want %q", got, want)
+	}
+}
+
+func TestResolveUserMentionNames(t *testing.T) {
+	users := []user{{ID: "U123", Name: "alice"}, {ID: "U456", RealName: "Alice Baker"}}
+	got, err := resolveUserMentionNames("hi <@alice> and <@Alice Baker> and <@U789>", users)
+	if err != nil {
+		t.Fatalf("resolveUserMentionNames returned error: %v", err)
+	}
+	want := "hi <@U123> and <@U456> and <@U789>"
+	if got != want {
+		t.Fatalf("resolveUserMentionNames = %q, want %q", got, want)
+	}
+}

@@ -313,7 +313,8 @@ func printUnreadConversation(ctx context.Context, client *SlackClient, item unre
 	for _, msg := range item.Messages {
 		when := formatSlackTS(msg.TS)
 		sender := senderLabel(msg, userNames, myUserID)
-		text := strings.ReplaceAll(strings.TrimSpace(msg.Text), "\n", " ")
+		text := readableUserMentions(msg.Text, userNames)
+		text = strings.ReplaceAll(strings.TrimSpace(text), "\n", " ")
 		if text == "" {
 			text = "(no text)"
 		}

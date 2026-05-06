@@ -136,6 +136,7 @@ func printHelp() {
 	fmt.Println("  slackie send [--attach PATH ...] [--no-mrkdwn] <target>")
 	fmt.Println("    Read the message body from stdin and send it as the Slack App to the target.")
 	fmt.Println("    Slack mrkdwn formatting is enabled by default; use --no-mrkdwn to disable it.")
+	fmt.Println("    Mention users in messages with <@alice> or <@Alice Baker>.")
 	fmt.Println("    Use --attach multiple times to upload local files.")
 	fmt.Println()
 	fmt.Println("Targets:")

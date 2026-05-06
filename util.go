@@ -167,6 +167,10 @@ func cmdSend(target string, attachmentPaths []string, mrkdwn bool) error {
 	if strings.TrimSpace(text) == "" && len(attachmentPaths) == 0 {
 		return errors.New("nothing to send: provide stdin message text and/or --attach PATH")
 	}
+	text, err = resolveUserMentionsInText(ctx, client, text)
+	if err != nil {
+		return err
+	}
 
 	convTarget, threadTS := splitThreadTarget(target)
 	convID, display, err := resolveTarget(ctx, client, convTarget)
@@ -265,7 +269,7 @@ func isConversationID(s string) bool {
 }
 
 func isUserID(s string) bool {
-	if len(s) < 2 || s[0] != 'U' {
+	if len(s) < 2 || (s[0] != 'U' && s[0] != 'W') {
 		return false
 	}
 	for _, ch := range s[1:] {
@@ -274,6 +278,173 @@ func isUserID(s string) bool {
 		}
 	}
 	return true
+}
+
+func readableUserMentions(text string, userNames map[string]string) string {
+	if len(userNames) == 0 {
+		return text
+	}
+	return replaceUserMentions(text, func(raw string) (string, bool) {
+		id, ok := parseMentionUserID(raw)
+		if !ok {
+			return "", false
+		}
+		name := strings.TrimSpace(userNames[id])
+		if name == "" {
+			return "", false
+		}
+		return "<@" + name + ">", true
+	})
+}
+
+func resolveUserMentionsInText(ctx context.Context, client *SlackClient, text string) (string, error) {
+	if len(userMentionNames(text)) == 0 {
+		return text, nil
+	}
+	users, err := client.listUsers(ctx)
+	if err != nil {
+		return "", fmt.Errorf("resolve user mentions: %w", err)
+	}
+	return resolveUserMentionNames(text, users)
+}
+
+func resolveUserMentionNames(text string, users []user) (string, error) {
+	resolved := map[string]string{}
+	for _, name := range userMentionNames(text) {
+		u, err := findMentionUserByName(users, name)
+		if err != nil {
+			return "", err
+		}
+		resolved[strings.ToLower(name)] = u.ID
+	}
+
+	return replaceUserMentions(text, func(raw string) (string, bool) {
+		if _, ok := parseMentionUserID(raw); ok {
+			return "", false
+		}
+		name := strings.TrimSpace(raw)
+		if strings.HasPrefix(name, "@") {
+			name = strings.TrimSpace(strings.TrimPrefix(name, "@"))
+		}
+		id := resolved[strings.ToLower(name)]
+		if id == "" {
+			return "", false
+		}
+		return "<@" + id + ">", true
+	}), nil
+}
+
+func userMentionNames(text string) []string {
+	seen := map[string]struct{}{}
+	var names []string
+	for _, raw := range userMentionContents(text) {
+		if _, ok := parseMentionUserID(raw); ok {
+			continue
+		}
+		name := strings.TrimSpace(raw)
+		if strings.HasPrefix(name, "@") {
+			name = strings.TrimSpace(strings.TrimPrefix(name, "@"))
+		}
+		if name == "" {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
+func userMentionContents(text string) []string {
+	var out []string
+	for i := 0; i < len(text); {
+		start := strings.Index(text[i:], "<@")
+		if start < 0 {
+			break
+		}
+		start += i
+		end := strings.IndexByte(text[start+2:], '>')
+		if end < 0 {
+			break
+		}
+		end += start + 2
+		out = append(out, text[start+2:end])
+		i = end + 1
+	}
+	return out
+}
+
+func replaceUserMentions(text string, replacement func(raw string) (string, bool)) string {
+	var b strings.Builder
+	changed := false
+	for i := 0; i < len(text); {
+		start := strings.Index(text[i:], "<@")
+		if start < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		start += i
+		end := strings.IndexByte(text[start+2:], '>')
+		if end < 0 {
+			b.WriteString(text[i:])
+			break
+		}
+		end += start + 2
+		b.WriteString(text[i:start])
+		if repl, ok := replacement(text[start+2 : end]); ok {
+			b.WriteString(repl)
+			changed = true
+		} else {
+			b.WriteString(text[start : end+1])
+		}
+		i = end + 1
+	}
+	if !changed {
+		return text
+	}
+	return b.String()
+}
+
+func parseMentionUserID(raw string) (string, bool) {
+	id := strings.TrimSpace(raw)
+	if pipe := strings.IndexByte(id, '|'); pipe >= 0 {
+		id = strings.TrimSpace(id[:pipe])
+	}
+	if !isUserID(id) {
+		return "", false
+	}
+	return id, true
+}
+
+func findMentionUserByName(users []user, name string) (user, error) {
+	name = strings.TrimSpace(name)
+	var matches []user
+	for _, u := range users {
+		if u.Deleted {
+			continue
+		}
+		candidates := []string{u.Name, u.Profile.DisplayName, u.Profile.DisplayNameNormal, u.RealName, u.Profile.RealName}
+		for _, c := range candidates {
+			if strings.EqualFold(strings.TrimSpace(c), name) {
+				matches = append(matches, u)
+				break
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return user{}, fmt.Errorf("User not found: %s", name)
+	}
+	if len(matches) > 1 {
+		ids := make([]string, 0, len(matches))
+		for _, u := range matches {
+			ids = append(ids, fmt.Sprintf("%s(%s)", userDisplayName(u), u.ID))
+		}
+		return user{}, fmt.Errorf("multiple users matched <@%s>: %s", name, strings.Join(ids, ", "))
+	}
+	return matches[0], nil
 }
 
 func isSlackTS(s string) bool {
