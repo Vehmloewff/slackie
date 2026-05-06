@@ -60,7 +60,7 @@ func runRead(wait bool) error {
 	fmt.Println("No unread DMs or mentions. Waiting for the next message...")
 	appToken := socketModeAppToken(cfg)
 	if appToken == "" {
-		return fmt.Errorf("slackie read --wait requires a Slack app-level token; set SLACKIE_APP_TOKEN=xapp-... and re-run slackie auth")
+		return fmt.Errorf("slackie read --wait requires a Slack app-level token; run slackie setup and paste an xapp-... token")
 	}
 	if err := waitForSocketModeMessage(ctx, client, appToken, userNames, myUserID, &cfg); err != nil {
 		return err
