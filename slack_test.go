@@ -68,3 +68,21 @@ func TestParseSendArgsNoMrkdwn(t *testing.T) {
 		t.Fatalf("parseSendArgs = target %q, attachments %v, mrkdwn %v", target, attachments, mrkdwn)
 	}
 }
+
+func TestThreadingTargetUsesReadableDisplay(t *testing.T) {
+	got := threadingTarget("#backend", "1778108731.796869", "")
+	want := "#backend:1778108731.796869"
+	if got != want {
+		t.Fatalf("threadingTarget = %q, want %q", got, want)
+	}
+}
+
+func TestMessageThreadingTargetUsesConversationTitle(t *testing.T) {
+	conv := conversation{ID: "C0ATV4VEDC4", Name: "backend", IsChannel: true}
+	msg := message{TS: "1778108731.796869"}
+	got := messageThreadingTarget(conv, msg, nil)
+	want := "#backend:1778108731.796869"
+	if got != want {
+		t.Fatalf("messageThreadingTarget = %q, want %q", got, want)
+	}
+}

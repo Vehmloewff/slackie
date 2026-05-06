@@ -12,7 +12,7 @@ slackie read
 slackie read --wait
 printf 'ship it' | slackie send "#backend"
 printf 'hello' | slackie send "@alice"
-printf 'reply in thread' | slackie send "#backend:1740000000.123456"
+printf 'reply in thread' | slackie send "#backend:1740000000.123456" # threading target
 printf 'see attached' | slackie send --attach ./report.pdf "#backend"
 slackie reset
 ```

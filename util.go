@@ -106,6 +106,9 @@ func resolveTarget(ctx context.Context, client *SlackClient, target string) (con
 	}
 
 	if isConversationID(target) {
+		if conv, err := client.getConversationInfo(ctx, target); err == nil {
+			return target, conversationTitle(conv, nil), nil
+		}
 		return target, target, nil
 	}
 
@@ -176,11 +179,11 @@ func cmdSend(target string, attachmentPaths []string, mrkdwn bool) error {
 		if err != nil {
 			return err
 		}
-		threadTarget := sentThreadTarget(convID, resp.TS, threadTS)
+		threadingTarget := sentThreadingTarget(display, resp.TS, threadTS)
 		if threadTS != "" {
-			fmt.Printf("sent to %s thread %s (thread target: %s)\n", display, threadTS, threadTarget)
+			fmt.Printf("sent to %s thread %s (threading target: %s)\n", display, threadTS, threadingTarget)
 		} else {
-			fmt.Printf("sent to %s (thread target: %s)\n", display, threadTarget)
+			fmt.Printf("sent to %s (threading target: %s)\n", display, threadingTarget)
 		}
 		return nil
 	}
@@ -195,28 +198,38 @@ func cmdSend(target string, attachmentPaths []string, mrkdwn bool) error {
 		if err != nil {
 			return err
 		}
-		threadTarget := sentThreadTarget(convID, resp.File.TS, threadTS)
-		if threadTarget == "" {
-			threadTarget = resp.File.ID
-		}
+		threadingTarget := sentThreadingTarget(display, resp.File.TS, threadTS)
 		if threadTS != "" {
-			fmt.Printf("uploaded %s to %s thread %s (thread target: %s)\n", path, display, threadTS, threadTarget)
+			if threadingTarget != "" {
+				fmt.Printf("uploaded %s to %s thread %s (threading target: %s)\n", path, display, threadTS, threadingTarget)
+			} else {
+				fmt.Printf("uploaded %s to %s thread %s (file id: %s)\n", path, display, threadTS, resp.File.ID)
+			}
 		} else {
-			fmt.Printf("uploaded %s to %s (thread target: %s)\n", path, display, threadTarget)
+			if threadingTarget != "" {
+				fmt.Printf("uploaded %s to %s (threading target: %s)\n", path, display, threadingTarget)
+			} else {
+				fmt.Printf("uploaded %s to %s (file id: %s)\n", path, display, resp.File.ID)
+			}
 		}
 	}
 	return nil
 }
 
-func sentThreadTarget(channelID, messageTS, threadTS string) string {
-	if strings.TrimSpace(channelID) == "" {
+func sentThreadingTarget(display, messageTS, threadTS string) string {
+	return threadingTarget(display, messageTS, threadTS)
+}
+
+func threadingTarget(display, messageTS, threadTS string) string {
+	display = strings.TrimSpace(display)
+	if display == "" {
 		return ""
 	}
 	if isSlackTS(threadTS) {
-		return channelID + ":" + threadTS
+		return display + ":" + threadTS
 	}
 	if isSlackTS(messageTS) {
-		return channelID + ":" + messageTS
+		return display + ":" + messageTS
 	}
 	return ""
 }

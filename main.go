@@ -142,6 +142,8 @@ func printHelp() {
 	fmt.Println("  #channel-name")
 	fmt.Println("  C12345678")
 	fmt.Println("  @alice")
+	fmt.Println("Threading targets:")
 	fmt.Println("  #channel-name:1740000000.123456")
+	fmt.Println("  @alice:1740000000.123456")
 	fmt.Println("  C12345678:1740000000.123456")
 }
