@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -46,9 +45,6 @@ type socketModeEvent struct {
 }
 
 func socketModeAppToken(cfg Config) string {
-	if token := strings.TrimSpace(os.Getenv("SLACKIE_APP_TOKEN")); token != "" {
-		return token
-	}
 	return strings.TrimSpace(cfg.AppToken)
 }
 

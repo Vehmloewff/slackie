@@ -7,16 +7,6 @@ import (
 	"strings"
 )
 
-var (
-	// slackClientID can be set at build time with:
-	//   go build -ldflags "-X main.slackClientID=<client-id>"
-	// or at runtime with SLACKIE_CLIENT_ID.
-	slackClientID = ""
-	// Bot scopes require a public HTTPS web URL redirect. Slack rejects
-	// custom-scheme redirects and may also reject localhost as non-web.
-	slackRedirectURI = "https://example.com/slackie/callback"
-)
-
 var defaultScopes = []string{
 	"users:read",
 }
@@ -55,16 +45,16 @@ func run() error {
 	case "help", "-h", "--help":
 		printHelp()
 		return nil
-	case "auth":
+	case "setup":
 		if len(args) != 1 {
-			return errors.New("usage: slackie auth")
+			return errors.New("usage: slackie setup")
 		}
-		return cmdAuth()
-	case "unauth":
+		return cmdSetup()
+	case "reset":
 		if len(args) != 1 {
-			return errors.New("usage: slackie unauth")
+			return errors.New("usage: slackie reset")
 		}
-		return cmdUnauth()
+		return cmdReset()
 	case "read":
 		wait, err := parseReadArgs(args[1:])
 		if err != nil {
@@ -133,8 +123,8 @@ func printHelp() {
 	fmt.Println("slackie - tiny Slack App Web API CLI")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  slackie auth")
-	fmt.Println("  slackie unauth")
+	fmt.Println("  slackie setup")
+	fmt.Println("  slackie reset")
 	fmt.Println("  slackie read")
 	fmt.Println("  slackie read --wait")
 	fmt.Println("  slackie send [--attach PATH ...] <target>")
@@ -146,6 +136,14 @@ func printHelp() {
 	fmt.Println("  slackie read --wait")
 	fmt.Println("    Run the normal unread scan first. If none exist, wait for the next")
 	fmt.Println("    newly arrived DM or mention, print it, remember it read, and exit.")
+	fmt.Println()
+	fmt.Println("setup:")
+	fmt.Println("  slackie setup")
+	fmt.Println("    Print a Slack app manifest, then save the bot token (xoxb-...) and app token (xapp-...).")
+	fmt.Println()
+	fmt.Println("reset:")
+	fmt.Println("  slackie reset")
+	fmt.Println("    Remove the saved slackie token config.")
 	fmt.Println()
 	fmt.Println("send:")
 	fmt.Println("  slackie send [--attach PATH ...] <target>")

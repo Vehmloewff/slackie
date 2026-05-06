@@ -3,15 +3,11 @@ package main
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,14 +15,12 @@ import (
 )
 
 const (
-	slackAuthorizeURL  = "https://slack.com/oauth/v2/authorize"
-	slackOAuthTokenURL = "https://slack.com/api/oauth.v2.access"
-	configDirName      = "slackie"
-	configFileName     = "config.json"
+	configDirName  = "slackie"
+	configFileName = "config.json"
 )
 
 // Config is the small durable JSON state stored in the user config dir.
-// It intentionally keeps only the values needed after auth completes.
+// It intentionally keeps only the values needed after setup completes.
 type Config struct {
 	ClientID        string            `json:"client_id"`
 	RedirectURI     string            `json:"redirect_uri"`
@@ -45,26 +39,6 @@ type Config struct {
 	LastSeen        map[string]string `json:"last_seen,omitempty"`
 }
 
-type oauthAccessResponse struct {
-	OK           bool   `json:"ok"`
-	Error        string `json:"error"`
-	AccessToken  string `json:"access_token"`
-	RefreshToken string `json:"refresh_token"`
-	TokenType    string `json:"token_type"`
-	Scope        string `json:"scope"`
-	Team         struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
-	} `json:"team"`
-	AuthedUser struct {
-		ID           string `json:"id"`
-		Scope        string `json:"scope"`
-		AccessToken  string `json:"access_token"`
-		TokenType    string `json:"token_type"`
-		RefreshToken string `json:"refresh_token"`
-	} `json:"authed_user"`
-}
-
 type authTestResponse struct {
 	OK     bool   `json:"ok"`
 	Error  string `json:"error"`
@@ -74,134 +48,89 @@ type authTestResponse struct {
 	URL    string `json:"url"`
 }
 
-func cmdAuth() error {
-	clientID, redirectURI, err := authSettings()
+var testSlackToken = func(ctx context.Context, httpClient *http.Client, token string) (*authTestResponse, error) {
+	client := &SlackClient{HTTPClient: httpClient, Token: token}
+	return client.authTest(ctx)
+}
+
+func cmdSetup() error {
+	return runSetup(os.Stdin)
+}
+
+func runSetup(reader io.Reader) error {
+	fmt.Println("Set up slackie by creating a Slack app from a manifest, then pasting its tokens.")
+	fmt.Println()
+
+	buf := bufio.NewReader(reader)
+	fmt.Print("Bot name to use in Slack: ")
+	botName, err := readSetupToken(buf, "bot name")
 	if err != nil {
 		return err
 	}
-	appToken := strings.TrimSpace(os.Getenv("SLACKIE_APP_TOKEN"))
-	if appToken == "" {
-		return errors.New("missing Slack app-level token; set SLACKIE_APP_TOKEN=xapp-... when running slackie auth")
-	}
-
-	state, err := randomURLSafe(32)
-	if err != nil {
-		return fmt.Errorf("generate state: %w", err)
-	}
-	verifier, err := randomURLSafe(64)
-	if err != nil {
-		return fmt.Errorf("generate code verifier: %w", err)
-	}
-	challenge := pkceChallengeS256(verifier)
-
-	authURL, err := buildAuthorizeURL(clientID, redirectURI, state, challenge, defaultScopes)
+	manifest, err := slackAppManifest(botName)
 	if err != nil {
 		return err
 	}
 
-	fmt.Printf("Using redirect URI: %s\n", redirectURI)
-	fmt.Printf("Requesting bot scopes: %s\n", strings.Join(defaultBotScopes, ","))
-	fmt.Printf("Requesting user scopes: %s\n", strings.Join(defaultScopes, ","))
 	fmt.Println()
-	fmt.Println("Open this Slack authorize URL in your browser:")
+	fmt.Println("Create the Slack app:")
+	fmt.Println("1. Open https://api.slack.com/apps and choose \"Create New App\".")
+	fmt.Println("2. Choose \"From an app manifest\".")
+	fmt.Println("3. Pick the workspace you want slackie to send Slack messages to and read messages from.")
 	fmt.Println()
-	fmt.Println(authURL)
-	fmt.Println()
-	fmt.Println("After you approve access, Slack will redirect to your configured redirect URI.")
-	fmt.Println("Copy the full final redirected URL from your browser address bar and paste it below.")
-	fmt.Println("The auth code is short-lived, so do this promptly.")
-	fmt.Println()
-
-	reader := bufio.NewReader(os.Stdin)
-	fmt.Print("Paste the full redirected URL here: ")
-	pasted, err := reader.ReadString('\n')
-	if err != nil && !errors.Is(err, io.EOF) {
-		return fmt.Errorf("read pasted URL: %w", err)
-	}
-	pasted = strings.TrimSpace(pasted)
-	if pasted == "" {
-		return errors.New("no callback URL provided")
+	if err := waitForEnter(buf, "Press Enter to show the Slack app manifest: "); err != nil {
+		return err
 	}
 
-	code, returnedState, err := parseOAuthCallback(pasted)
+	fmt.Println()
+	fmt.Println("Slack app manifest:")
+	fmt.Println("```json")
+	fmt.Println(manifest)
+	fmt.Println("```")
+	fmt.Println()
+	if err := waitForEnter(buf, "Copy the manifest above. Press Enter to continue: "); err != nil {
+		return err
+	}
+
+	fmt.Println()
+	fmt.Println("Paste the manifest into Slack and create the app. Then click Install App, click Install to your workspace, click Allow, and copy the Bot User OAuth Token (xoxb-...) that Slack shows you.")
+	fmt.Print("Bot User OAuth Token (xoxb-...): ")
+	botToken, err := readSetupToken(buf, "bot token")
 	if err != nil {
 		return err
 	}
-	if returnedState != state {
-		return errors.New("oauth state mismatch")
+	if !strings.HasPrefix(botToken, "xoxb-") {
+		return errors.New("invalid bot token: expected a Bot User OAuth Token starting with xoxb-")
+	}
+
+	fmt.Println()
+	fmt.Println("In Basic Information > App-Level Tokens, create a token with connections:write and copy the xapp-... token.")
+	fmt.Print("App-level Socket Mode token (xapp-...): ")
+	appToken, err := readSetupToken(buf, "app token")
+	if err != nil {
+		return err
+	}
+	if !strings.HasPrefix(appToken, "xapp-") {
+		return errors.New("invalid app token: expected an app-level Socket Mode token starting with xapp-")
+	}
+	cfg := Config{
+		Scopes:         append([]string(nil), defaultScopes...),
+		BotScopes:      append([]string(nil), defaultBotScopes...),
+		AccessToken:    botToken,
+		BotAccessToken: botToken,
+		AppToken:       appToken,
+		LastSeen:       map[string]string{},
 	}
 
 	ctx := context.Background()
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := exchangeOAuthCode(ctx, httpClient, clientID, redirectURI, code, verifier)
+	authInfo, err := testSlackToken(ctx, httpClient, botToken)
 	if err != nil {
-		return err
+		return fmt.Errorf("Slack rejected the bot token or it could not be verified; token was not saved: %w", err)
 	}
-
-	userAccessToken := strings.TrimSpace(resp.AuthedUser.AccessToken)
-	botAccessToken := strings.TrimSpace(resp.AccessToken)
-	accessToken := userAccessToken
-	if botAccessToken != "" {
-		accessToken = botAccessToken
-	}
-	if accessToken == "" {
-		return errors.New("oauth exchange succeeded but no access token was returned")
-	}
-
-	tokenType := strings.TrimSpace(resp.AuthedUser.TokenType)
-	if tokenType == "" {
-		tokenType = strings.TrimSpace(resp.TokenType)
-	}
-	refreshToken := strings.TrimSpace(resp.AuthedUser.RefreshToken)
-	if refreshToken == "" {
-		refreshToken = strings.TrimSpace(resp.RefreshToken)
-	}
-
-	cfg := Config{
-		ClientID:        clientID,
-		RedirectURI:     redirectURI,
-		Scopes:          append([]string(nil), defaultScopes...),
-		BotScopes:       append([]string(nil), defaultBotScopes...),
-		AccessToken:     accessToken,
-		UserAccessToken: userAccessToken,
-		BotAccessToken:  botAccessToken,
-		AppToken:        appToken,
-		RefreshToken:    refreshToken,
-		TokenType:       tokenType,
-		UserID:          strings.TrimSpace(resp.AuthedUser.ID),
-		TeamID:          strings.TrimSpace(resp.Team.ID),
-		TeamName:        strings.TrimSpace(resp.Team.Name),
-		LastSeen:        map[string]string{},
-	}
-
-	if cfg.UserAccessToken != "" {
-		client := &SlackClient{HTTPClient: httpClient, Token: cfg.UserAccessToken}
-		authInfo, err := client.authTest(ctx)
-		if err == nil {
-			if cfg.UserID == "" {
-				cfg.UserID = authInfo.UserID
-			}
-			if cfg.TeamID == "" {
-				cfg.TeamID = authInfo.TeamID
-			}
-			if cfg.TeamName == "" {
-				cfg.TeamName = authInfo.Team
-			}
-		}
-	}
-	if cfg.BotAccessToken != "" {
-		client := &SlackClient{HTTPClient: httpClient, Token: cfg.BotAccessToken}
-		authInfo, err := client.authTest(ctx)
-		if err == nil {
-			cfg.BotUserID = authInfo.UserID
-			if cfg.TeamID == "" {
-				cfg.TeamID = authInfo.TeamID
-			}
-			if cfg.TeamName == "" {
-				cfg.TeamName = authInfo.Team
-			}
-		}
-	}
+	cfg.BotUserID = authInfo.UserID
+	cfg.TeamID = authInfo.TeamID
+	cfg.TeamName = authInfo.Team
 
 	path, err := saveConfig(cfg)
 	if err != nil {
@@ -209,125 +138,39 @@ func cmdAuth() error {
 	}
 
 	fmt.Println()
-	fmt.Println("Auth saved.")
+	fmt.Println("Setup complete. Bot token saved.")
+	fmt.Println("slackie will use this Bot User OAuth Token to read Slack messages and send app messages.")
 	if cfg.TeamName != "" || cfg.TeamID != "" {
 		fmt.Printf("Workspace: %s (%s)\n", emptyFallback(cfg.TeamName, "unknown"), emptyFallback(cfg.TeamID, "unknown"))
-	}
-	if cfg.UserID != "" {
-		fmt.Printf("User ID: %s\n", cfg.UserID)
 	}
 	if cfg.BotUserID != "" {
 		fmt.Printf("Bot user ID: %s\n", cfg.BotUserID)
 	}
-	if cfg.AppToken != "" {
-		fmt.Println("Socket Mode app token saved.")
-	}
+	fmt.Println("Socket Mode app token saved for slackie read --wait.")
+	fmt.Println("Next: try `slackie read`, `slackie read --wait`, or pipe a message to `slackie send <target>`.")
 	fmt.Printf("Config: %s\n", path)
 	return nil
 }
 
-func authSettings() (clientID, redirectURI string, err error) {
-	clientID = strings.TrimSpace(os.Getenv("SLACKIE_CLIENT_ID"))
-	if clientID == "" {
-		clientID = strings.TrimSpace(slackClientID)
+func readSetupToken(reader *bufio.Reader, name string) (string, error) {
+	pasted, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", fmt.Errorf("read %s: %w", name, err)
 	}
-	if clientID == "" {
-		return "", "", errors.New("missing Slack app client ID; set SLACKIE_CLIENT_ID to the Client ID from your Slack app's Basic Information page")
+	token := strings.TrimSpace(pasted)
+	if token == "" {
+		return "", fmt.Errorf("no %s provided", name)
 	}
-
-	redirectURI = strings.TrimSpace(os.Getenv("SLACKIE_REDIRECT_URI"))
-	if redirectURI == "" {
-		redirectURI = strings.TrimSpace(slackRedirectURI)
-	}
-	if redirectURI == "" {
-		return "", "", errors.New("missing Slack redirect URI")
-	}
-	parsedRedirectURI, err := url.Parse(redirectURI)
-	if err != nil || parsedRedirectURI.Scheme == "" || parsedRedirectURI.Host == "" {
-		return "", "", fmt.Errorf("invalid Slack redirect URI %q", redirectURI)
-	}
-	if parsedRedirectURI.Scheme != "https" {
-		return "", "", fmt.Errorf("Slack bot scopes require an HTTPS web redirect URI; remove SLACKIE_REDIRECT_URI or set it to an HTTPS URL registered in Slack, e.g. %s", slackRedirectURI)
-	}
-	return clientID, redirectURI, nil
+	return token, nil
 }
 
-func buildAuthorizeURL(clientID, redirectURI, state, challenge string, scopes []string) (string, error) {
-	u, err := url.Parse(slackAuthorizeURL)
-	if err != nil {
-		return "", fmt.Errorf("parse authorize url: %w", err)
+func waitForEnter(reader *bufio.Reader, prompt string) error {
+	fmt.Print(prompt)
+	_, err := reader.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("wait for Enter: %w", err)
 	}
-	q := u.Query()
-	q.Set("client_id", clientID)
-	q.Set("redirect_uri", redirectURI)
-	q.Set("state", state)
-	q.Set("scope", strings.Join(defaultBotScopes, ","))
-	q.Set("user_scope", strings.Join(scopes, ","))
-	q.Set("code_challenge", challenge)
-	q.Set("code_challenge_method", "S256")
-	u.RawQuery = q.Encode()
-	return u.String(), nil
-}
-
-func parseOAuthCallback(raw string) (code, state string, err error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", "", fmt.Errorf("malformed callback url: %w", err)
-	}
-	q := u.Query()
-	if oauthErr := strings.TrimSpace(q.Get("error")); oauthErr != "" {
-		if oauthErr == "access_denied" {
-			return "", "", errors.New("access was denied in Slack")
-		}
-		return "", "", fmt.Errorf("oauth error from Slack: %s", oauthErr)
-	}
-	state = strings.TrimSpace(q.Get("state"))
-	if state == "" {
-		return "", "", errors.New("callback URL is missing state")
-	}
-	code = strings.TrimSpace(q.Get("code"))
-	if code == "" {
-		return "", "", errors.New("callback URL is missing code")
-	}
-	return code, state, nil
-}
-
-func exchangeOAuthCode(ctx context.Context, httpClient *http.Client, clientID, redirectURI, code, verifier string) (*oauthAccessResponse, error) {
-	form := url.Values{}
-	form.Set("client_id", clientID)
-	form.Set("code", code)
-	form.Set("redirect_uri", redirectURI)
-	form.Set("code_verifier", verifier)
-	if clientSecret := strings.TrimSpace(os.Getenv("SLACKIE_CLIENT_SECRET")); clientSecret != "" {
-		form.Set("client_secret", clientSecret)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackOAuthTokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, fmt.Errorf("build oauth request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("oauth exchange request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return nil, fmt.Errorf("oauth exchange failed: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-
-	var out oauthAccessResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode oauth response: %w", err)
-	}
-	if !out.OK {
-		return nil, fmt.Errorf("oauth exchange failed: %s", emptyFallback(out.Error, "unknown_error"))
-	}
-	return &out, nil
+	return nil
 }
 
 func loadConfig() (Config, string, error) {
@@ -338,7 +181,7 @@ func loadConfig() (Config, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return Config{}, path, fmt.Errorf("no config found at %s; run: slackie auth", path)
+			return Config{}, path, fmt.Errorf("no config found at %s; run: slackie setup", path)
 		}
 		return Config{}, path, fmt.Errorf("read config: %w", err)
 	}
@@ -347,7 +190,7 @@ func loadConfig() (Config, string, error) {
 		return Config{}, path, fmt.Errorf("parse config %s: %w", path, err)
 	}
 	if strings.TrimSpace(cfg.AccessToken) == "" && strings.TrimSpace(cfg.BotAccessToken) == "" && strings.TrimSpace(cfg.UserAccessToken) == "" {
-		return Config{}, path, fmt.Errorf("config %s does not contain an access token; run: slackie auth", path)
+		return Config{}, path, fmt.Errorf("config %s does not contain an access token; run: slackie setup", path)
 	}
 	return cfg, path, nil
 }
@@ -398,19 +241,19 @@ func saveConfig(cfg Config) (string, error) {
 	return path, nil
 }
 
-func cmdUnauth() error {
+func cmdReset() error {
 	path, err := configPath()
 	if err != nil {
 		return err
 	}
 	if err := os.Remove(path); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			fmt.Printf("No auth config found at %s\n", path)
+			fmt.Printf("No slackie config found at %s\n", path)
 			return nil
 		}
 		return fmt.Errorf("remove config: %w", err)
 	}
-	fmt.Printf("Removed auth config: %s\n", path)
+	fmt.Printf("Removed slackie config: %s\n", path)
 	return nil
 }
 
@@ -420,17 +263,4 @@ func configPath() (string, error) {
 		return "", fmt.Errorf("resolve user config dir: %w", err)
 	}
 	return filepath.Join(dir, configDirName, configFileName), nil
-}
-
-func randomURLSafe(n int) (string, error) {
-	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(buf), nil
-}
-
-func pkceChallengeS256(verifier string) string {
-	sum := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
