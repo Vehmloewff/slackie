@@ -62,11 +62,11 @@ func run() error {
 		}
 		return runRead(wait)
 	case "send":
-		target, attachments, err := parseSendArgs(args[1:])
+		target, attachments, mrkdwn, err := parseSendArgs(args[1:])
 		if err != nil {
 			return err
 		}
-		return cmdSend(target, attachments)
+		return cmdSend(target, attachments, mrkdwn)
 	default:
 		printHelp()
 		return fmt.Errorf("unknown command: %s", args[0])
@@ -86,37 +86,40 @@ func parseReadArgs(args []string) (bool, error) {
 	return wait, nil
 }
 
-func parseSendArgs(args []string) (string, []string, error) {
+func parseSendArgs(args []string) (string, []string, bool, error) {
 	var target string
 	var attachments []string
+	mrkdwn := true
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
 		switch {
+		case arg == "--no-mrkdwn":
+			mrkdwn = false
 		case arg == "--attach":
 			i++
 			if i >= len(args) || strings.TrimSpace(args[i]) == "" {
-				return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+				return "", nil, false, errors.New("usage: slackie send [--attach PATH ...] [--no-mrkdwn] <target>")
 			}
 			attachments = append(attachments, args[i])
 		case strings.HasPrefix(arg, "--attach="):
 			path := strings.TrimSpace(strings.TrimPrefix(arg, "--attach="))
 			if path == "" {
-				return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+				return "", nil, false, errors.New("usage: slackie send [--attach PATH ...] [--no-mrkdwn] <target>")
 			}
 			attachments = append(attachments, path)
 		default:
 			if target != "" {
-				return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+				return "", nil, false, errors.New("usage: slackie send [--attach PATH ...] [--no-mrkdwn] <target>")
 			}
 			target = arg
 		}
 	}
 
 	if strings.TrimSpace(target) == "" {
-		return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+		return "", nil, false, errors.New("usage: slackie send [--attach PATH ...] [--no-mrkdwn] <target>")
 	}
-	return target, attachments, nil
+	return target, attachments, mrkdwn, nil
 }
 
 func printHelp() {
@@ -127,7 +130,7 @@ func printHelp() {
 	fmt.Println("  slackie reset")
 	fmt.Println("  slackie read")
 	fmt.Println("  slackie read --wait")
-	fmt.Println("  slackie send [--attach PATH ...] <target>")
+	fmt.Println("  slackie send [--attach PATH ...] [--no-mrkdwn] <target>")
 	fmt.Println("  slackie help")
 	fmt.Println()
 	fmt.Println("read:")
@@ -146,8 +149,9 @@ func printHelp() {
 	fmt.Println("    Remove the saved slackie token config.")
 	fmt.Println()
 	fmt.Println("send:")
-	fmt.Println("  slackie send [--attach PATH ...] <target>")
+	fmt.Println("  slackie send [--attach PATH ...] [--no-mrkdwn] <target>")
 	fmt.Println("    Read the message body from stdin and send it as the Slack App to the target.")
+	fmt.Println("    Slack mrkdwn formatting is enabled by default; use --no-mrkdwn to disable it.")
 	fmt.Println("    Use --attach multiple times to upload local files.")
 	fmt.Println()
 	fmt.Println("Targets:")
