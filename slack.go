@@ -140,6 +140,7 @@ type fileUploadResponse struct {
 	File  struct {
 		ID   string `json:"id"`
 		Name string `json:"name"`
+		TS   string `json:"ts"`
 	} `json:"file"`
 }
 
@@ -154,9 +155,20 @@ type completeUploadExternalResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error"`
 	Files []struct {
-		ID   string `json:"id"`
-		Name string `json:"name"`
+		ID     string          `json:"id"`
+		Name   string          `json:"name"`
+		Shares slackFileShares `json:"shares"`
 	} `json:"files"`
+}
+
+type slackFileShares struct {
+	Public  map[string][]slackFileShare `json:"public"`
+	Private map[string][]slackFileShare `json:"private"`
+}
+
+type slackFileShare struct {
+	TS       string `json:"ts"`
+	ThreadTS string `json:"thread_ts"`
 }
 
 type HistoryOptions struct {
@@ -272,10 +284,13 @@ func (c *SlackClient) openDM(ctx context.Context, userID string) (conversation, 
 	return out.Channel, nil
 }
 
-func (c *SlackClient) postMessage(ctx context.Context, channelID, text, threadTS string) (*chatPostMessageResponse, error) {
+func (c *SlackClient) postMessage(ctx context.Context, channelID, text, threadTS string, mrkdwn bool) (*chatPostMessageResponse, error) {
 	form := url.Values{}
 	form.Set("channel", channelID)
 	form.Set("text", text)
+	if mrkdwn {
+		form.Set("mrkdwn", "true")
+	}
 	if threadTS != "" {
 		form.Set("thread_ts", threadTS)
 	}
@@ -373,8 +388,38 @@ func (c *SlackClient) completeUploadExternal(ctx context.Context, channelID, thr
 	if len(out.Files) > 0 {
 		resp.File.ID = out.Files[0].ID
 		resp.File.Name = out.Files[0].Name
+		resp.File.TS = firstFileShareTS(out.Files[0].Shares, channelID)
 	}
 	return resp, nil
+}
+
+func firstFileShareTS(shares slackFileShares, channelID string) string {
+	for _, group := range []map[string][]slackFileShare{shares.Public, shares.Private} {
+		if len(group) == 0 {
+			continue
+		}
+		if shareTS := firstShareTS(group[channelID]); shareTS != "" {
+			return shareTS
+		}
+		for _, shares := range group {
+			if shareTS := firstShareTS(shares); shareTS != "" {
+				return shareTS
+			}
+		}
+	}
+	return ""
+}
+
+func firstShareTS(shares []slackFileShare) string {
+	for _, share := range shares {
+		if isSlackTS(share.ThreadTS) {
+			return share.ThreadTS
+		}
+		if isSlackTS(share.TS) {
+			return share.TS
+		}
+	}
+	return ""
 }
 
 func (c *SlackClient) apiGet(ctx context.Context, method string, params url.Values, out interface{}) error {

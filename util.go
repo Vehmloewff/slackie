@@ -148,7 +148,7 @@ func findUserByName(users []user, name string) (user, error) {
 	return matches[0], nil
 }
 
-func cmdSend(target string, attachmentPaths []string) error {
+func cmdSend(target string, attachmentPaths []string, mrkdwn bool) error {
 	cfg, _, err := loadConfig()
 	if err != nil {
 		return err
@@ -172,14 +172,15 @@ func cmdSend(target string, attachmentPaths []string) error {
 	}
 
 	if len(attachmentPaths) == 0 {
-		resp, err := client.postMessage(ctx, convID, text, threadTS)
+		resp, err := client.postMessage(ctx, convID, text, threadTS, mrkdwn)
 		if err != nil {
 			return err
 		}
+		threadTarget := sentThreadTarget(convID, resp.TS, threadTS)
 		if threadTS != "" {
-			fmt.Printf("sent to %s thread %s (%s)\n", display, threadTS, resp.TS)
+			fmt.Printf("sent to %s thread %s (thread target: %s)\n", display, threadTS, threadTarget)
 		} else {
-			fmt.Printf("sent to %s (%s)\n", display, resp.TS)
+			fmt.Printf("sent to %s (thread target: %s)\n", display, threadTarget)
 		}
 		return nil
 	}
@@ -194,13 +195,30 @@ func cmdSend(target string, attachmentPaths []string) error {
 		if err != nil {
 			return err
 		}
+		threadTarget := sentThreadTarget(convID, resp.File.TS, threadTS)
+		if threadTarget == "" {
+			threadTarget = resp.File.ID
+		}
 		if threadTS != "" {
-			fmt.Printf("uploaded %s to %s thread %s (%s)\n", path, display, threadTS, resp.File.ID)
+			fmt.Printf("uploaded %s to %s thread %s (thread target: %s)\n", path, display, threadTS, threadTarget)
 		} else {
-			fmt.Printf("uploaded %s to %s (%s)\n", path, display, resp.File.ID)
+			fmt.Printf("uploaded %s to %s (thread target: %s)\n", path, display, threadTarget)
 		}
 	}
 	return nil
+}
+
+func sentThreadTarget(channelID, messageTS, threadTS string) string {
+	if strings.TrimSpace(channelID) == "" {
+		return ""
+	}
+	if isSlackTS(threadTS) {
+		return channelID + ":" + threadTS
+	}
+	if isSlackTS(messageTS) {
+		return channelID + ":" + messageTS
+	}
+	return ""
 }
 
 func splitThreadTarget(target string) (string, string) {
