@@ -22,21 +22,25 @@ const (
 // Config is the small durable JSON state stored in the user config dir.
 // It intentionally keeps only the values needed after setup completes.
 type Config struct {
-	ClientID        string            `json:"client_id"`
-	RedirectURI     string            `json:"redirect_uri"`
-	Scopes          []string          `json:"scopes"`
-	BotScopes       []string          `json:"bot_scopes,omitempty"`
-	AccessToken     string            `json:"access_token"` // legacy/user token fallback
-	UserAccessToken string            `json:"user_access_token,omitempty"`
-	BotAccessToken  string            `json:"bot_access_token,omitempty"`
-	RefreshToken    string            `json:"refresh_token,omitempty"`
-	TokenType       string            `json:"token_type,omitempty"`
-	UserID          string            `json:"user_id,omitempty"`
-	BotUserID       string            `json:"bot_user_id,omitempty"`
-	TeamID          string            `json:"team_id,omitempty"`
-	TeamName        string            `json:"team_name,omitempty"`
-	AppToken        string            `json:"app_token,omitempty"`
-	LastSeen        map[string]string `json:"last_seen,omitempty"`
+	ClientID            string            `json:"client_id"`
+	RedirectURI         string            `json:"redirect_uri"`
+	Scopes              []string          `json:"scopes"`
+	BotScopes           []string          `json:"bot_scopes,omitempty"`
+	AccessToken         string            `json:"access_token"` // legacy/user token fallback
+	UserAccessToken     string            `json:"user_access_token,omitempty"`
+	BotAccessToken      string            `json:"bot_access_token,omitempty"`
+	RefreshToken        string            `json:"refresh_token,omitempty"`
+	TokenType           string            `json:"token_type,omitempty"`
+	UserID              string            `json:"user_id,omitempty"`
+	BotUserID           string            `json:"bot_user_id,omitempty"`
+	TeamID              string            `json:"team_id,omitempty"`
+	TeamName            string            `json:"team_name,omitempty"`
+	AppToken            string            `json:"app_token,omitempty"`
+	LastSeen            map[string]string `json:"last_seen,omitempty"`
+	ReadAppMentionsOnly *bool             `json:"read_app_mentions_only,omitempty"`
+	ReadDMs             *bool             `json:"read_dms,omitempty"`
+	ReadPrivateChannels *bool             `json:"read_private_channels,omitempty"`
+	ReadMessageGroups   *bool             `json:"read_message_groups,omitempty"`
 }
 
 type authTestResponse struct {
@@ -67,7 +71,24 @@ func runSetup(reader io.Reader) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := slackAppManifest(botName)
+	readAppMentionsOnly, err := promptReadAppMentionsOnly(buf)
+	if err != nil {
+		return err
+	}
+	readDMs, err := promptSetupYesNo(buf, "Allow slackie to receive DMs?", "If enabled, slackie can read direct messages sent to the app.")
+	if err != nil {
+		return err
+	}
+	readPrivateChannels, err := promptSetupYesNo(buf, "Allow slackie to receive messages in private channels?", "If enabled, slackie can read messages from private channels where the app is installed.")
+	if err != nil {
+		return err
+	}
+	readMessageGroups, err := promptSetupYesNo(buf, "Allow slackie to receive messages in message groups?", "If enabled, slackie can read multi-person direct messages where the app is installed.")
+	if err != nil {
+		return err
+	}
+	settings := readSettings{ReadAppMentionsOnly: readAppMentionsOnly, ReadDMs: readDMs, ReadPrivateChannels: readPrivateChannels, ReadMessageGroups: readMessageGroups}
+	manifest, err := slackAppManifest(botName, settings)
 	if err != nil {
 		return err
 	}
@@ -114,12 +135,16 @@ func runSetup(reader io.Reader) error {
 		return errors.New("invalid app token: expected an app-level Socket Mode token starting with xapp-")
 	}
 	cfg := Config{
-		Scopes:         append([]string(nil), defaultScopes...),
-		BotScopes:      append([]string(nil), defaultBotScopes...),
-		AccessToken:    botToken,
-		BotAccessToken: botToken,
-		AppToken:       appToken,
-		LastSeen:       map[string]string{},
+		Scopes:              append([]string(nil), defaultScopes...),
+		BotScopes:           setupBotScopes(settings),
+		AccessToken:         botToken,
+		BotAccessToken:      botToken,
+		AppToken:            appToken,
+		LastSeen:            map[string]string{},
+		ReadAppMentionsOnly: boolPtr(readAppMentionsOnly),
+		ReadDMs:             boolPtr(readDMs),
+		ReadPrivateChannels: boolPtr(readPrivateChannels),
+		ReadMessageGroups:   boolPtr(readMessageGroups),
 	}
 
 	ctx := context.Background()
@@ -140,6 +165,12 @@ func runSetup(reader io.Reader) error {
 	fmt.Println()
 	fmt.Println("Setup complete. Bot token saved.")
 	fmt.Println("slackie will use this Bot User OAuth Token to read Slack messages and send app messages.")
+	if cfg.readAppMentionsOnly() {
+		fmt.Println("Read mode: mention-only (channel messages are shown only when they mention the bot).")
+	} else {
+		fmt.Println("Read mode: all-channel-messages (messages are shown from channels the app is installed in and subscribed to).")
+	}
+	fmt.Printf("DMs: %s; private channels: %s; message groups: %s\n", enabledLabel(cfg.readDMs()), enabledLabel(cfg.readPrivateChannels()), enabledLabel(cfg.readMessageGroups()))
 	if cfg.TeamName != "" || cfg.TeamID != "" {
 		fmt.Printf("Workspace: %s (%s)\n", emptyFallback(cfg.TeamName, "unknown"), emptyFallback(cfg.TeamID, "unknown"))
 	}
@@ -150,6 +181,103 @@ func runSetup(reader io.Reader) error {
 	fmt.Println("Next: try `slackie read`, `slackie read --wait`, or pipe a message to `slackie send <target>`.")
 	fmt.Printf("Config: %s\n", path)
 	return nil
+}
+
+func promptReadAppMentionsOnly(reader *bufio.Reader) (bool, error) {
+	fmt.Println()
+	fmt.Println("Should the app receive only messages where the bot is mentioned, or all messages from the channels the app has access to?")
+	fmt.Println("1. Mention-only mode")
+	fmt.Println("   slackie receives channel messages only when someone mentions the bot, such as <@bot>.")
+	fmt.Println("2. All-channel-messages mode")
+	fmt.Println("   slackie receives all messages from public channels the app is installed in; DMs, private channels, and message groups are configured next.")
+	for {
+		fmt.Print("Choose read mode [1/2]: ")
+		choice, err := readSetupToken(reader, "read mode")
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(choice) {
+		case "1", "mention", "mention-only", "mention-only mode":
+			return true, nil
+		case "2", "all", "all-channel", "all-channel-messages", "all-channel-messages mode":
+			return false, nil
+		default:
+			fmt.Println("Please enter 1 for mention-only mode or 2 for all-channel-messages mode.")
+		}
+	}
+}
+
+func promptSetupYesNo(reader *bufio.Reader, question, explanation string) (bool, error) {
+	fmt.Println()
+	fmt.Println(question)
+	fmt.Println(explanation)
+	for {
+		fmt.Print("Choose [y/n]: ")
+		choice, err := readSetupToken(reader, "choice")
+		if err != nil {
+			return false, err
+		}
+		switch strings.ToLower(choice) {
+		case "y", "yes":
+			return true, nil
+		case "n", "no":
+			return false, nil
+		default:
+			fmt.Println("Please enter y or n.")
+		}
+	}
+}
+
+func setupBotScopes(settings readSettings) []string {
+	return manifestBotScopes(settings)
+}
+
+func boolPtr(v bool) *bool {
+	return &v
+}
+
+func (cfg Config) readAppMentionsOnly() bool {
+	if cfg.ReadAppMentionsOnly == nil {
+		return true
+	}
+	return *cfg.ReadAppMentionsOnly
+}
+
+func (cfg Config) readDMs() bool {
+	if cfg.ReadDMs == nil {
+		return true
+	}
+	return *cfg.ReadDMs
+}
+
+func (cfg Config) readPrivateChannels() bool {
+	if cfg.ReadPrivateChannels == nil {
+		return true
+	}
+	return *cfg.ReadPrivateChannels
+}
+
+func (cfg Config) readMessageGroups() bool {
+	if cfg.ReadMessageGroups == nil {
+		return true
+	}
+	return *cfg.ReadMessageGroups
+}
+
+func enabledLabel(v bool) string {
+	if v {
+		return "enabled"
+	}
+	return "disabled"
+}
+
+func configReadSettings(cfg Config) readSettings {
+	return readSettings{
+		ReadAppMentionsOnly: cfg.readAppMentionsOnly(),
+		ReadDMs:             cfg.readDMs(),
+		ReadPrivateChannels: cfg.readPrivateChannels(),
+		ReadMessageGroups:   cfg.readMessageGroups(),
+	}
 }
 
 func readSetupToken(reader *bufio.Reader, name string) (string, error) {
