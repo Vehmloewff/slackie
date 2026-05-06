@@ -2,7 +2,7 @@
 
 Tiny Slack Web API CLI using Slack OAuth with PKCE. It installs a bot token for app messages and a small user token for user lookup.
 
-Usage examples:
+## Usage
 
 ```sh
 SLACKIE_CLIENT_ID=1234567890.1234567890 SLACKIE_APP_TOKEN=xapp-... slackie auth
@@ -15,47 +15,20 @@ printf 'see attached' | slackie send --attach ./report.pdf "#backend"
 slackie unauth
 ```
 
-`auth` requests bot scopes with Slack's `scope` authorize parameter and `users:read` as a user scope. Bot scopes require a public HTTPS web URL redirect URI. Use:
+## Configuring the Slack app
 
-```text
-https://example.com/slackie/callback
-```
+`slackie` requests bot scopes with Slack's `scope` authorize parameter and `users:read` with `user_scope`. Use the included [`slackbot_manifest.json`](./slackbot_manifest.json) when creating or updating the Slack app; it defines the required redirect URL, OAuth scopes, PKCE, Socket Mode, and event subscriptions.
 
-## Slack app scopes
+1. Create a Slack app at <https://api.slack.com/apps> by importing `slackbot_manifest.json`.
+2. Create an app-level token with `connections:write` for Socket Mode.
+3. Run:
 
-Configure **OAuth & Permissions → Bot Token Scopes** with:
+   ```sh
+   SLACKIE_CLIENT_ID=<client-id> SLACKIE_APP_TOKEN=xapp-... slackie auth
+   ```
 
-- `app_mentions:read`
-- `chat:write`
-- `channels:history`, `channels:read`
-- `groups:history`, `groups:read`
-- `im:history`, `im:read`
-- `mpim:history`, `mpim:read`
-- `users:read`
-- `files:read`, `files:write` (only needed for attachments)
+4. After approving access, Slack redirects to `https://example.com/slackie/callback?...`. That's OK: copy the full final URL from the browser address bar and paste it back into the terminal.
 
-For `read --wait` with Socket Mode, also create an **App-Level Token** with:
-
-- `connections:write`
-
-Then pass it as `SLACKIE_APP_TOKEN=xapp-...` when running `slackie auth`; it is saved in the slackie config for future `read --wait` runs. Subscribe the app to bot events:
-
-- `app_mention`
-- `message.im`
-- `message.mpim` (optional)
-
-Configure **OAuth & Permissions → User Token Scopes** with:
-
-- `users:read`
-
-Add this redirect URL exactly in **OAuth & Permissions → Redirect URLs**:
-
-```text
-https://example.com/slackie/callback
-```
-
-After approving, Slack redirects to example.com. That's OK: copy the full URL from the address bar and paste it into `slackie auth`. The OAuth code is protected by PKCE, so the code alone is not sufficient to authenticate.
-
-If your app uses a different web redirect URI, set `SLACKIE_REDIRECT_URI` to that exact value.
+If you use a different HTTPS redirect URI, update the manifest and set `SLACKIE_REDIRECT_URI` to the same value before running `slackie auth`.
 
 `slackie read --wait` requires a Socket Mode app-level token saved by `slackie auth`. You can override the saved token for a single run with `SLACKIE_APP_TOKEN=xapp-... slackie read --wait`.
