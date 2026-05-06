@@ -57,11 +57,6 @@ func runRead(wait bool) error {
 		return err
 	}
 
-	if cfg.readAppMentionsOnly() {
-		fmt.Println("No unread mentions. Waiting for the next mention...")
-	} else {
-		fmt.Println("No unread messages. Waiting for the next message...")
-	}
 	appToken := socketModeAppToken(cfg)
 	if appToken == "" {
 		return fmt.Errorf("slackie read --wait requires a Slack app-level token; run slackie setup and paste an xapp-... token")
@@ -91,20 +86,20 @@ func findUnreadConversations(ctx context.Context, client *SlackClient, convs []c
 	var out []unreadConversation
 
 	for _, conv := range convs {
-		baseline := bestBaseline(conv, cfg.LastSeen[conv.ID])
-		if baseline == "" {
-			// First run for this token: avoid dumping history and avoid one
-			// conversations.history request per channel. Use Slack's latest marker as
-			// our high-water mark; newly arriving messages will be fetched later.
-			rememberConversationLatest(cfg, conv)
-			continue
+		baseline := strings.TrimSpace(cfg.LastSeen[conv.ID])
+		// Do not rely on Slack read/unread/latest markers. Bot tokens often do not
+		// expose reliable read state there, so slackie uses only its saved LastSeen
+		// timestamp and asks history for anything newer. If there is no LastSeen yet,
+		// scan the most recent page rather than silently advancing past messages.
+		opts := HistoryOptions{Limit: 50}
+		if isSlackTS(baseline) {
+			opts.Oldest = baseline
 		}
-		if !conversationMayHaveNewMessages(conv, baseline) {
-			continue
-		}
-
-		msgs, err := fetchConversationHistory(ctx, client, conv.ID, HistoryOptions{Oldest: baseline, Limit: 50})
+		msgs, err := fetchConversationHistory(ctx, client, conv.ID, opts)
 		if err != nil {
+			if isConversationNotReadable(err) {
+				continue
+			}
 			return nil, fmt.Errorf("history for %s: %w", conversationTitle(conv, nil), err)
 		}
 
@@ -135,7 +130,7 @@ func bestBaseline(conv conversation, lastSeen string) string {
 }
 
 func hydrateConversationReadState(ctx context.Context, client *SlackClient, conv conversation) (conversation, error) {
-	if conv.LastRead != "" && conv.Latest != nil && conv.Latest.TS != "" {
+	if conv.LastRead != "" && conv.Latest != nil && isSlackTS(conv.Latest.TS) {
 		return conv, nil
 	}
 
@@ -449,6 +444,14 @@ func senderLabel(msg message, userNames map[string]string, myUserID string) stri
 		return "bot"
 	}
 	return "unknown"
+}
+
+func isConversationNotReadable(err error) bool {
+	if err == nil {
+		return false
+	}
+	text := err.Error()
+	return strings.Contains(text, "not_in_channel") || strings.Contains(text, "channel_not_found")
 }
 
 func isFatalSlackError(err error) bool {
