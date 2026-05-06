@@ -153,7 +153,7 @@ func cmdSend(target string, attachmentPaths []string) error {
 	if err != nil {
 		return err
 	}
-	client := &SlackClient{HTTPClient: &http.Client{Timeout: 30 * time.Second}, Token: cfg.AccessToken}
+	client := &SlackClient{HTTPClient: &http.Client{Timeout: 30 * time.Second}, Token: writeAccessToken(cfg)}
 	ctx := context.Background()
 
 	body, err := io.ReadAll(os.Stdin)
@@ -250,6 +250,7 @@ func isSlackTS(s string) bool {
 		return false
 	}
 	dot := 0
+	nonZero := false
 	for i, ch := range s {
 		if ch == '.' {
 			dot++
@@ -261,10 +262,25 @@ func isSlackTS(s string) bool {
 		if ch < '0' || ch > '9' {
 			return false
 		}
+		if ch != '0' {
+			nonZero = true
+		}
 	}
-	return dot == 1
+	return dot == 1 && nonZero
 }
 
 func slackTSGreater(a, b string) bool {
 	return a > b
+}
+
+func parseRetryAfter(raw string) time.Duration {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return time.Minute
+	}
+	secs, err := parseInt64(raw)
+	if err != nil || secs <= 0 {
+		return time.Minute
+	}
+	return time.Duration(secs) * time.Second
 }

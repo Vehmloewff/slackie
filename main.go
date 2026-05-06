@@ -7,12 +7,22 @@ import (
 	"strings"
 )
 
-const (
-	slackClientID    = "10137959977282.10936753440897"
-	slackRedirectURI = "slackie://callback"
+var (
+	// slackClientID can be set at build time with:
+	//   go build -ldflags "-X main.slackClientID=<client-id>"
+	// or at runtime with SLACKER_CLIENT_ID.
+	slackClientID = ""
+	// Bot scopes require a public HTTPS web URL redirect. Slack rejects
+	// custom-scheme redirects and may also reject localhost as non-web.
+	slackRedirectURI = "https://example.com/slacker/callback"
 )
 
 var defaultScopes = []string{
+	"users:read",
+}
+
+var defaultBotScopes = []string{
+	"app_mentions:read",
 	"chat:write",
 	"channels:history",
 	"groups:history",
@@ -22,10 +32,6 @@ var defaultScopes = []string{
 	"groups:read",
 	"im:read",
 	"mpim:read",
-	"channels:write",
-	"groups:write",
-	"im:write",
-	"mpim:write",
 	"users:read",
 	"files:read",
 	"files:write",
@@ -51,12 +57,12 @@ func run() error {
 		return nil
 	case "auth":
 		if len(args) != 1 {
-			return errors.New("usage: slackie auth")
+			return errors.New("usage: slacker auth")
 		}
 		return cmdAuth()
 	case "unauth":
 		if len(args) != 1 {
-			return errors.New("usage: slackie unauth")
+			return errors.New("usage: slacker unauth")
 		}
 		return cmdUnauth()
 	case "read":
@@ -84,7 +90,7 @@ func parseReadArgs(args []string) (bool, error) {
 		case "--wait":
 			wait = true
 		default:
-			return false, fmt.Errorf("usage: slackie read [--wait]")
+			return false, fmt.Errorf("usage: slacker read [--wait]")
 		}
 	}
 	return wait, nil
@@ -100,50 +106,50 @@ func parseSendArgs(args []string) (string, []string, error) {
 		case arg == "--attach":
 			i++
 			if i >= len(args) || strings.TrimSpace(args[i]) == "" {
-				return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+				return "", nil, errors.New("usage: slacker send [--attach PATH ...] <target>")
 			}
 			attachments = append(attachments, args[i])
 		case strings.HasPrefix(arg, "--attach="):
 			path := strings.TrimSpace(strings.TrimPrefix(arg, "--attach="))
 			if path == "" {
-				return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+				return "", nil, errors.New("usage: slacker send [--attach PATH ...] <target>")
 			}
 			attachments = append(attachments, path)
 		default:
 			if target != "" {
-				return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+				return "", nil, errors.New("usage: slacker send [--attach PATH ...] <target>")
 			}
 			target = arg
 		}
 	}
 
 	if strings.TrimSpace(target) == "" {
-		return "", nil, errors.New("usage: slackie send [--attach PATH ...] <target>")
+		return "", nil, errors.New("usage: slacker send [--attach PATH ...] <target>")
 	}
 	return target, attachments, nil
 }
 
 func printHelp() {
-	fmt.Println("slackie - tiny Slack CLI")
+	fmt.Println("slacker - tiny Slack App Web API CLI")
 	fmt.Println()
 	fmt.Println("Usage:")
-	fmt.Println("  slackie auth")
-	fmt.Println("  slackie unauth")
-	fmt.Println("  slackie read")
-	fmt.Println("  slackie read --wait")
-	fmt.Println("  slackie send [--attach PATH ...] <target>")
-	fmt.Println("  slackie help")
+	fmt.Println("  slacker auth")
+	fmt.Println("  slacker unauth")
+	fmt.Println("  slacker read")
+	fmt.Println("  slacker read --wait")
+	fmt.Println("  slacker send [--attach PATH ...] <target>")
+	fmt.Println("  slacker help")
 	fmt.Println()
 	fmt.Println("read:")
-	fmt.Println("  slackie read")
-	fmt.Println("    List unread conversations, mark them read, and exit.")
-	fmt.Println("  slackie read --wait")
+	fmt.Println("  slacker read")
+	fmt.Println("    List unread DMs and messages that mention the app, remember them read, and exit.")
+	fmt.Println("  slacker read --wait")
 	fmt.Println("    Run the normal unread scan first. If none exist, wait for the next")
-	fmt.Println("    newly arrived message, print it, mark it read, and exit.")
+	fmt.Println("    newly arrived DM or mention, print it, remember it read, and exit.")
 	fmt.Println()
 	fmt.Println("send:")
-	fmt.Println("  slackie send [--attach PATH ...] <target>")
-	fmt.Println("    Read the message body from stdin and send it to the target.")
+	fmt.Println("  slacker send [--attach PATH ...] <target>")
+	fmt.Println("    Read the message body from stdin and send it as the Slack App to the target.")
 	fmt.Println("    Use --attach multiple times to upload local files.")
 	fmt.Println()
 	fmt.Println("Targets:")
