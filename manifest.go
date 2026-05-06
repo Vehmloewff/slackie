@@ -5,62 +5,87 @@ import (
 	"fmt"
 )
 
-var manifestBotScopes = []string{
-	"files:write",
-	"app_mentions:read",
+type readSettings struct {
+	ReadAppMentionsOnly bool
+	ReadDMs             bool
+	ReadPrivateChannels bool
+	ReadMessageGroups   bool
+}
+
+var manifestBaseBotScopes = []string{
 	"channels:history",
 	"channels:join",
 	"channels:read",
 	"chat:write",
-	"dnd:read",
-	"emoji:read",
 	"files:read",
-	"groups:history",
-	"im:history",
-	"im:read",
-	"links:read",
-	"metadata.message:read",
-	"mpim:history",
-	"mpim:read",
-	"pins:read",
-	"reactions:read",
-	"reactions:write",
-	"reminders:read",
-	"reminders:write",
-	"search:read.files",
-	"search:read.im",
-	"search:read.mpim",
-	"search:read.private",
-	"search:read.public",
-	"search:read.users",
-	"team:read",
-	"users.profile:read",
-	"users:read",
-	"users:read.email",
-	"users:write",
-	"groups:read",
+	"files:write",
 	"im:write",
+	"users:read",
 }
 
-func slackAppManifest(botName string) (string, error) {
+func manifestBotScopes(settings readSettings) []string {
+	scopes := append([]string(nil), manifestBaseBotScopes...)
+	if settings.ReadAppMentionsOnly {
+		scopes = append(scopes, "app_mentions:read")
+	}
+	if settings.ReadDMs {
+		scopes = append(scopes, "im:history", "im:read")
+	}
+	if settings.ReadPrivateChannels {
+		scopes = append(scopes, "groups:history", "groups:read")
+	}
+	if settings.ReadMessageGroups {
+		scopes = append(scopes, "mpim:history", "mpim:read")
+	}
+	return scopes
+}
+
+func manifestBotEvents(settings readSettings) []string {
+	events := []string{}
+	if settings.ReadAppMentionsOnly {
+		events = append(events, "app_mention")
+	} else {
+		events = append(events, "message.channels")
+		if settings.ReadPrivateChannels {
+			events = append(events, "message.groups")
+		}
+	}
+	if settings.ReadDMs {
+		events = append(events, "message.im")
+	}
+	if settings.ReadMessageGroups {
+		events = append(events, "message.mpim")
+	}
+	return events
+}
+
+func slackAppManifest(botName string, settings readSettings) (string, error) {
+	features := map[string]any{
+		"bot_user": map[string]any{
+			"display_name":  botName,
+			"always_online": false,
+		},
+	}
+	if settings.ReadDMs {
+		features["app_home"] = map[string]any{
+			"messages_tab_enabled":           true,
+			"messages_tab_read_only_enabled": false,
+		}
+	}
+
 	manifest := map[string]any{
 		"display_information": map[string]any{
 			"name": botName,
 		},
-		"features": map[string]any{
-			"bot_user": map[string]any{
-				"display_name":  botName,
-				"always_online": false,
-			},
-		},
+		"features": features,
 		"oauth_config": map[string]any{
 			"scopes": map[string]any{
-				"bot": manifestBotScopes,
+				"bot": manifestBotScopes(settings),
 			},
 		},
 		"settings": map[string]any{
 			"event_subscriptions": map[string]any{
-				"bot_events": []string{"app_mention", "reaction_added"},
+				"bot_events": manifestBotEvents(settings),
 			},
 			"interactivity": map[string]any{
 				"is_enabled": true,

@@ -11,22 +11,6 @@ var defaultScopes = []string{
 	"users:read",
 }
 
-var defaultBotScopes = []string{
-	"app_mentions:read",
-	"chat:write",
-	"channels:history",
-	"groups:history",
-	"im:history",
-	"mpim:history",
-	"channels:read",
-	"groups:read",
-	"im:read",
-	"mpim:read",
-	"users:read",
-	"files:read",
-	"files:write",
-}
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -135,14 +119,14 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println("read:")
 	fmt.Println("  slackie read")
-	fmt.Println("    List unread DMs and messages that mention the app, remember them read, and exit.")
+	fmt.Println("    List unread messages for the read mode selected during setup, remember them read, and exit.")
 	fmt.Println("  slackie read --wait")
 	fmt.Println("    Run the normal unread scan first. If none exist, wait for the next")
-	fmt.Println("    newly arrived DM or mention, print it, remember it read, and exit.")
+	fmt.Println("    newly arrived matching message, print it, remember it read, and exit.")
 	fmt.Println()
 	fmt.Println("setup:")
 	fmt.Println("  slackie setup")
-	fmt.Println("    Print a Slack app manifest, then save the bot token (xoxb-...) and app token (xapp-...).")
+	fmt.Println("    Choose read access, print a matching Slack app manifest, then save the bot token (xoxb-...) and app token (xapp-...).")
 	fmt.Println()
 	fmt.Println("reset:")
 	fmt.Println("  slackie reset")

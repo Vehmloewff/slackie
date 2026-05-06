@@ -185,11 +185,15 @@ func (c *SlackClient) authTest(ctx context.Context) (*authTestResponse, error) {
 }
 
 func (c *SlackClient) listAllConversations(ctx context.Context) ([]conversation, error) {
+	return c.listConversations(ctx, "public_channel,private_channel,im,mpim")
+}
+
+func (c *SlackClient) listConversations(ctx context.Context, types string) ([]conversation, error) {
 	var all []conversation
 	cursor := ""
 	for {
 		params := url.Values{}
-		params.Set("types", "public_channel,private_channel,im,mpim")
+		params.Set("types", types)
 		params.Set("exclude_archived", "true")
 		params.Set("limit", "999")
 		if cursor != "" {

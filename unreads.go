@@ -35,7 +35,7 @@ func runRead(wait bool) error {
 	}
 	userNames := buildUserNameMap(users)
 
-	convs, err := client.listAllConversations(ctx)
+	convs, err := client.listConversations(ctx, configConversationTypes(cfg))
 	if err != nil {
 		return fmt.Errorf("load conversations: %w", err)
 	}
@@ -57,7 +57,11 @@ func runRead(wait bool) error {
 		return err
 	}
 
-	fmt.Println("No unread DMs or mentions. Waiting for the next message...")
+	if cfg.readAppMentionsOnly() {
+		fmt.Println("No unread mentions. Waiting for the next mention...")
+	} else {
+		fmt.Println("No unread messages. Waiting for the next message...")
+	}
 	appToken := socketModeAppToken(cfg)
 	if appToken == "" {
 		return fmt.Errorf("slackie read --wait requires a Slack app-level token; run slackie setup and paste an xapp-... token")
@@ -67,6 +71,20 @@ func runRead(wait bool) error {
 	}
 	_, err = saveConfig(cfg)
 	return err
+}
+
+func configConversationTypes(cfg Config) string {
+	types := []string{"public_channel"}
+	if cfg.readPrivateChannels() {
+		types = append(types, "private_channel")
+	}
+	if cfg.readDMs() {
+		types = append(types, "im")
+	}
+	if cfg.readMessageGroups() {
+		types = append(types, "mpim")
+	}
+	return strings.Join(types, ",")
 }
 
 func findUnreadConversations(ctx context.Context, client *SlackClient, convs []conversation, cfg *Config) ([]unreadConversation, error) {
@@ -90,7 +108,7 @@ func findUnreadConversations(ctx context.Context, client *SlackClient, convs []c
 			return nil, fmt.Errorf("history for %s: %w", conversationTitle(conv, nil), err)
 		}
 
-		visible := relevantUnreadMessages(conv, msgs, cfg.UserID)
+		visible := relevantUnreadMessages(conv, msgs, mentionUserID(*cfg), cfg.readAppMentionsOnly())
 		if len(visible) == 0 {
 			rememberLatest(cfg, conv.ID, msgs)
 			continue
@@ -156,7 +174,7 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 	for {
 		time.Sleep(unreadPollInterval)
 
-		freshConvs, err := client.listAllConversations(ctx)
+		freshConvs, err := client.listConversations(ctx, configConversationTypes(*cfg))
 		if err != nil {
 			if isFatalSlackError(err) {
 				return err
@@ -188,7 +206,7 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 				continue
 			}
 
-			visible := relevantUnreadMessages(conv, msgs, myUserID)
+			visible := relevantUnreadMessages(conv, msgs, myUserID, cfg.readAppMentionsOnly())
 			rememberLatest(cfg, conv.ID, msgs)
 			if len(visible) == 0 {
 				continue
@@ -243,7 +261,7 @@ func conversationMayHaveNewMessages(conv conversation, baseline string) bool {
 	return conv.UnreadCount > 0 || conv.UnreadCountDisplay > 0
 }
 
-func relevantUnreadMessages(conv conversation, in []message, myUserID string) []message {
+func relevantUnreadMessages(conv conversation, in []message, myUserID string, readAppMentionsOnly bool) []message {
 	out := make([]message, 0, len(in))
 	for _, msg := range filterVisibleMessages(in) {
 		if msg.User == myUserID || (myUserID != "" && strings.Contains(msg.Text, "<@"+myUserID+">") && msg.User == myUserID) {
@@ -253,7 +271,7 @@ func relevantUnreadMessages(conv conversation, in []message, myUserID string) []
 			out = append(out, msg)
 			continue
 		}
-		if myUserID != "" && strings.Contains(msg.Text, "<@"+myUserID+">") {
+		if !readAppMentionsOnly || (myUserID != "" && strings.Contains(msg.Text, "<@"+myUserID+">")) {
 			out = append(out, msg)
 		}
 	}

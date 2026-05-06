@@ -96,7 +96,7 @@ func waitForSocketModeMessage(ctx context.Context, client *SlackClient, appToken
 		case "disconnect":
 			return fmt.Errorf("socket mode disconnected: %s", emptyFallback(env.Reason, "unknown_reason"))
 		case "events_api":
-			item, ok, err := unreadFromSocketEvent(ctx, client, env.Payload, userNames, myUserID)
+			item, ok, err := unreadFromSocketEvent(ctx, client, env.Payload, userNames, myUserID, configReadSettings(*cfg))
 			if err != nil {
 				return err
 			}
@@ -112,7 +112,7 @@ func waitForSocketModeMessage(ctx context.Context, client *SlackClient, appToken
 	}
 }
 
-func unreadFromSocketEvent(ctx context.Context, client *SlackClient, payload json.RawMessage, userNames map[string]string, myUserID string) (unreadConversation, bool, error) {
+func unreadFromSocketEvent(ctx context.Context, client *SlackClient, payload json.RawMessage, userNames map[string]string, myUserID string, settings readSettings) (unreadConversation, bool, error) {
 	var p socketModeEventsPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
 		return unreadConversation{}, false, fmt.Errorf("decode socket mode event payload: %w", err)
@@ -127,8 +127,23 @@ func unreadFromSocketEvent(ctx context.Context, client *SlackClient, payload jso
 
 	isDM := event.Type == "message" && event.ChannelType == "im"
 	isMPIM := event.Type == "message" && event.ChannelType == "mpim"
-	isMention := event.Type == "app_mention" || (myUserID != "" && strings.Contains(event.Text, "<@"+myUserID+">") && event.ChannelType != "im" && event.ChannelType != "mpim")
-	if !isDM && !isMPIM && !isMention {
+	isPrivateChannel := event.ChannelType == "group"
+	isMessage := event.Type == "message"
+	isMention := event.Type == "app_mention" || (myUserID != "" && strings.Contains(event.Text, "<@"+myUserID+">"))
+	if isDM && !settings.ReadDMs {
+		return unreadConversation{}, false, nil
+	}
+	if isMPIM && !settings.ReadMessageGroups {
+		return unreadConversation{}, false, nil
+	}
+	if isPrivateChannel && !settings.ReadPrivateChannels {
+		return unreadConversation{}, false, nil
+	}
+	if settings.ReadAppMentionsOnly {
+		if !isMention && !isDM && !isMPIM {
+			return unreadConversation{}, false, nil
+		}
+	} else if !isMessage {
 		return unreadConversation{}, false, nil
 	}
 
