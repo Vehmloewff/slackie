@@ -1,4 +1,4 @@
-module slacker
+module slackie
 
 go 1.22
 

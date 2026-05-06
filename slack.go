@@ -420,7 +420,7 @@ func (c *SlackClient) downloadToTempFile(ctx context.Context, rawURL, suggestedN
 	}
 
 	suffix := attachmentTempSuffix(finalURL, suggestedName)
-	file, err := os.CreateTemp("", "slacker-attachment-*"+suffix)
+	file, err := os.CreateTemp("", "slackie-attachment-*"+suffix)
 	if err != nil {
 		return "", fmt.Errorf("create temp attachment file: %w", err)
 	}
