@@ -471,6 +471,10 @@ func isSlackTS(s string) bool {
 	return dot == 1 && nonZero
 }
 
+func slackTimestamp(t time.Time) string {
+	return fmt.Sprintf("%d.%06d", t.Unix(), t.Nanosecond()/1000)
+}
+
 func slackTSGreater(a, b string) bool {
 	return a > b
 }

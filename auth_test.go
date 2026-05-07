@@ -81,6 +81,9 @@ func TestRunSetupPromptsForTokensAndSavesConfig(t *testing.T) {
 	if cfg.BotUserID != "U123" || cfg.TeamID != "T123" || cfg.TeamName != "Example" {
 		t.Fatalf("auth.test metadata was not saved: %+v", cfg)
 	}
+	if !isSlackTS(cfg.LastSeen) {
+		t.Fatalf("last_seen was not initialized to a Slack timestamp: %+v", cfg)
+	}
 	if cfg.ReadAppMentionsOnly == nil || !*cfg.ReadAppMentionsOnly {
 		t.Fatalf("read_app_mentions_only was not persisted as true: %+v", cfg)
 	}

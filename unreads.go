@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -22,10 +23,6 @@ func runRead(wait bool) error {
 	if err != nil {
 		return err
 	}
-	if cfg.LastSeen == nil {
-		cfg.LastSeen = map[string]string{}
-	}
-
 	client := &SlackClient{HTTPClient: &http.Client{Timeout: 30 * time.Second}, Token: readAccessToken(cfg)}
 	ctx := context.Background()
 
@@ -84,13 +81,14 @@ func configConversationTypes(cfg Config) string {
 
 func findUnreadConversations(ctx context.Context, client *SlackClient, convs []conversation, cfg *Config) ([]unreadConversation, error) {
 	var out []unreadConversation
+	baseline := strings.TrimSpace(cfg.LastSeen)
 
 	for _, conv := range convs {
-		baseline := strings.TrimSpace(cfg.LastSeen[conv.ID])
 		// Do not rely on Slack read/unread/latest markers. Bot tokens often do not
-		// expose reliable read state there, so slackie uses only its saved LastSeen
-		// timestamp and asks history for anything newer. If there is no LastSeen yet,
-		// scan the most recent page rather than silently advancing past messages.
+		// expose reliable read state there, so slackie uses only its saved global
+		// LastSeen timestamp and asks history for anything newer. If there is no
+		// LastSeen yet, scan the most recent page rather than silently advancing
+		// past messages.
 		opts := HistoryOptions{Limit: 50}
 		if isSlackTS(baseline) {
 			opts.Oldest = baseline
@@ -103,9 +101,10 @@ func findUnreadConversations(ctx context.Context, client *SlackClient, convs []c
 			return nil, fmt.Errorf("history for %s: %w", conversationTitle(conv, nil), err)
 		}
 
+		rememberLatest(cfg, msgs)
+
 		visible := relevantUnreadMessages(conv, msgs, mentionUserID(*cfg), cfg.readAppMentionsOnly())
 		if len(visible) == 0 {
-			rememberLatest(cfg, conv.ID, msgs)
 			continue
 		}
 
@@ -160,8 +159,8 @@ func hydrateConversationReadState(ctx context.Context, client *SlackClient, conv
 }
 
 func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conversation, userNames map[string]string, myUserID string, cfg *Config) error {
-	for _, conv := range convs {
-		if cfg.LastSeen[conv.ID] == "" {
+	if strings.TrimSpace(cfg.LastSeen) == "" {
+		for _, conv := range convs {
 			rememberConversationLatest(cfg, conv)
 		}
 	}
@@ -179,7 +178,7 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 		}
 
 		for _, conv := range freshConvs {
-			baseline := cfg.LastSeen[conv.ID]
+			baseline := strings.TrimSpace(cfg.LastSeen)
 			if baseline == "" {
 				rememberConversationLatest(cfg, conv)
 				continue
@@ -202,7 +201,7 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 			}
 
 			visible := relevantUnreadMessages(conv, msgs, myUserID, cfg.readAppMentionsOnly())
-			rememberLatest(cfg, conv.ID, msgs)
+			rememberLatest(cfg, msgs)
 			if len(visible) == 0 {
 				continue
 			}
@@ -218,34 +217,35 @@ func waitForNextMessage(ctx context.Context, client *SlackClient, convs []conver
 }
 
 func printAndRememberUnread(ctx context.Context, client *SlackClient, unreads []unreadConversation, userNames map[string]string, myUserID string, cfg *Config) error {
+	var out bytes.Buffer
 	for i, item := range unreads {
-		if err := printUnreadConversation(ctx, client, item, userNames, myUserID); err != nil {
+		rendered, err := renderUnreadConversation(ctx, client, item, userNames, myUserID)
+		if err != nil {
 			return fmt.Errorf("print %s: %w", conversationTitle(item.Conv, userNames), err)
 		}
-		rememberLatest(cfg, item.Conv.ID, item.Messages)
+		out.WriteString(rendered)
 		if i != len(unreads)-1 {
-			fmt.Println()
+			out.WriteByte('\n')
 		}
 	}
-	return nil
+
+	for _, item := range unreads {
+		rememberLatest(cfg, item.Messages)
+	}
+	_, err := os.Stdout.Write(out.Bytes())
+	return err
 }
 
-func rememberLatest(cfg *Config, channelID string, msgs []message) {
-	if cfg.LastSeen == nil {
-		cfg.LastSeen = map[string]string{}
-	}
+func rememberLatest(cfg *Config, msgs []message) {
 	latest := latestMessageTS(msgs)
-	if latest != "" && slackTSGreater(latest, cfg.LastSeen[channelID]) {
-		cfg.LastSeen[channelID] = latest
+	if latest != "" && slackTSGreater(latest, cfg.LastSeen) {
+		cfg.LastSeen = latest
 	}
 }
 
 func rememberConversationLatest(cfg *Config, conv conversation) {
-	if cfg.LastSeen == nil {
-		cfg.LastSeen = map[string]string{}
-	}
-	if conv.Latest != nil && isSlackTS(conv.Latest.TS) && slackTSGreater(conv.Latest.TS, cfg.LastSeen[conv.ID]) {
-		cfg.LastSeen[conv.ID] = conv.Latest.TS
+	if conv.Latest != nil && isSlackTS(conv.Latest.TS) && slackTSGreater(conv.Latest.TS, cfg.LastSeen) {
+		cfg.LastSeen = conv.Latest.TS
 	}
 }
 
@@ -304,7 +304,17 @@ func latestMessageTS(msgs []message) string {
 }
 
 func printUnreadConversation(ctx context.Context, client *SlackClient, item unreadConversation, userNames map[string]string, myUserID string) error {
-	fmt.Println(conversationHeading(item.Conv, userNames))
+	rendered, err := renderUnreadConversation(ctx, client, item, userNames, myUserID)
+	if err != nil {
+		return err
+	}
+	_, err = os.Stdout.Write([]byte(rendered))
+	return err
+}
+
+func renderUnreadConversation(ctx context.Context, client *SlackClient, item unreadConversation, userNames map[string]string, myUserID string) (string, error) {
+	var out bytes.Buffer
+	fmt.Fprintln(&out, conversationHeading(item.Conv, userNames))
 	for _, msg := range item.Messages {
 		when := formatSlackTS(msg.TS)
 		sender := senderLabel(msg, userNames, myUserID)
@@ -313,20 +323,20 @@ func printUnreadConversation(ctx context.Context, client *SlackClient, item unre
 		if text == "" {
 			text = "(no text)"
 		}
-		fmt.Printf("  %s %s: %s\n", when, sender, text)
+		fmt.Fprintf(&out, "  %s %s: %s\n", when, sender, text)
 		if target := messageThreadingTarget(item.Conv, msg, userNames); target != "" {
-			fmt.Printf("    threading target: %s\n", target)
+			fmt.Fprintf(&out, "    threading target: %s\n", target)
 		}
 
 		attachmentPaths, err := downloadMessageAttachments(ctx, client, msg)
 		if err != nil {
-			return err
+			return "", err
 		}
 		for _, path := range attachmentPaths {
-			fmt.Printf("    %s\n", path)
+			fmt.Fprintf(&out, "    %s\n", path)
 		}
 	}
-	return nil
+	return out.String(), nil
 }
 
 func messageThreadingTarget(conv conversation, msg message, userNames map[string]string) string {

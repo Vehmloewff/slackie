@@ -106,7 +106,7 @@ func waitForSocketModeMessage(ctx context.Context, client *SlackClient, appToken
 			if err := printUnreadConversation(ctx, client, item, userNames, myUserID); err != nil {
 				return fmt.Errorf("print %s: %w", conversationTitle(item.Conv, userNames), err)
 			}
-			rememberLatest(cfg, item.Conv.ID, item.Messages)
+			rememberLatest(cfg, item.Messages)
 			return nil
 		}
 	}

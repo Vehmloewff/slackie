@@ -32,7 +32,7 @@ func TestFindUnreadConversationsFirstRunScansRecentHistory(t *testing.T) {
 		}
 		return jsonResponse(`{"ok":true,"messages":[{"type":"message","ts":"1778108731.000100","user":"U1","text":"old"}]}`), nil
 	})}}
-	cfg := &Config{LastSeen: map[string]string{}, ReadAppMentionsOnly: boolPtr(false), BotUserID: "UBOT"}
+	cfg := &Config{ReadAppMentionsOnly: boolPtr(false), BotUserID: "UBOT"}
 
 	unreads, err := findUnreadConversations(context.Background(), client, []conversation{{ID: "C123", Name: "general", IsChannel: true}}, cfg)
 	if err != nil {
@@ -41,8 +41,8 @@ func TestFindUnreadConversationsFirstRunScansRecentHistory(t *testing.T) {
 	if len(unreads) != 1 || len(unreads[0].Messages) != 1 {
 		t.Fatalf("unreads = %+v, want one recent message", unreads)
 	}
-	if got := cfg.LastSeen["C123"]; got != "" {
-		t.Fatalf("LastSeen = %q before printing, want unchanged", got)
+	if got := cfg.LastSeen; got != "1778108731.000100" {
+		t.Fatalf("LastSeen = %q, want newest history timestamp", got)
 	}
 }
 
@@ -53,7 +53,7 @@ func TestFindUnreadConversationsSkipsUnreadableConversations(t *testing.T) {
 		}
 		return jsonResponse(`{"ok":false,"error":"not_in_channel"}`), nil
 	})}}
-	cfg := &Config{LastSeen: map[string]string{}, ReadAppMentionsOnly: boolPtr(false)}
+	cfg := &Config{ReadAppMentionsOnly: boolPtr(false)}
 
 	unreads, err := findUnreadConversations(context.Background(), client, []conversation{{ID: "C123", Name: "social", IsChannel: true}}, cfg)
 	if err != nil {
@@ -74,7 +74,7 @@ func TestFindUnreadConversationsUsesOnlyLastSeenToFetchNewerMessages(t *testing.
 		}
 		return jsonResponse(`{"ok":true,"messages":[{"type":"message","ts":"1778108731.000200","user":"U1","text":"new"}]}`), nil
 	})}}
-	cfg := &Config{LastSeen: map[string]string{"C123": "1778108731.000100"}, ReadAppMentionsOnly: boolPtr(false), BotUserID: "UBOT"}
+	cfg := &Config{LastSeen: "1778108731.000100", ReadAppMentionsOnly: boolPtr(false), BotUserID: "UBOT"}
 
 	unreads, err := findUnreadConversations(context.Background(), client, []conversation{{ID: "C123", Name: "general", IsChannel: true}}, cfg)
 	if err != nil {

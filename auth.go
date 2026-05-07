@@ -22,25 +22,100 @@ const (
 // Config is the small durable JSON state stored in the user config dir.
 // It intentionally keeps only the values needed after setup completes.
 type Config struct {
-	ClientID            string            `json:"client_id"`
-	RedirectURI         string            `json:"redirect_uri"`
-	Scopes              []string          `json:"scopes"`
-	BotScopes           []string          `json:"bot_scopes,omitempty"`
-	AccessToken         string            `json:"access_token"` // legacy/user token fallback
-	UserAccessToken     string            `json:"user_access_token,omitempty"`
-	BotAccessToken      string            `json:"bot_access_token,omitempty"`
-	RefreshToken        string            `json:"refresh_token,omitempty"`
-	TokenType           string            `json:"token_type,omitempty"`
-	UserID              string            `json:"user_id,omitempty"`
-	BotUserID           string            `json:"bot_user_id,omitempty"`
-	TeamID              string            `json:"team_id,omitempty"`
-	TeamName            string            `json:"team_name,omitempty"`
-	AppToken            string            `json:"app_token,omitempty"`
-	LastSeen            map[string]string `json:"last_seen,omitempty"`
-	ReadAppMentionsOnly *bool             `json:"read_app_mentions_only,omitempty"`
-	ReadDMs             *bool             `json:"read_dms,omitempty"`
-	ReadPrivateChannels *bool             `json:"read_private_channels,omitempty"`
-	ReadMessageGroups   *bool             `json:"read_message_groups,omitempty"`
+	ClientID            string   `json:"client_id"`
+	RedirectURI         string   `json:"redirect_uri"`
+	Scopes              []string `json:"scopes"`
+	BotScopes           []string `json:"bot_scopes,omitempty"`
+	AccessToken         string   `json:"access_token"` // legacy/user token fallback
+	UserAccessToken     string   `json:"user_access_token,omitempty"`
+	BotAccessToken      string   `json:"bot_access_token,omitempty"`
+	RefreshToken        string   `json:"refresh_token,omitempty"`
+	TokenType           string   `json:"token_type,omitempty"`
+	UserID              string   `json:"user_id,omitempty"`
+	BotUserID           string   `json:"bot_user_id,omitempty"`
+	TeamID              string   `json:"team_id,omitempty"`
+	TeamName            string   `json:"team_name,omitempty"`
+	AppToken            string   `json:"app_token,omitempty"`
+	LastSeen            string   `json:"last_seen,omitempty"`
+	ReadAppMentionsOnly *bool    `json:"read_app_mentions_only,omitempty"`
+	ReadDMs             *bool    `json:"read_dms,omitempty"`
+	ReadPrivateChannels *bool    `json:"read_private_channels,omitempty"`
+	ReadMessageGroups   *bool    `json:"read_message_groups,omitempty"`
+}
+
+func (cfg *Config) UnmarshalJSON(data []byte) error {
+	type configCompat struct {
+		ClientID            string          `json:"client_id"`
+		RedirectURI         string          `json:"redirect_uri"`
+		Scopes              []string        `json:"scopes"`
+		BotScopes           []string        `json:"bot_scopes,omitempty"`
+		AccessToken         string          `json:"access_token"`
+		UserAccessToken     string          `json:"user_access_token,omitempty"`
+		BotAccessToken      string          `json:"bot_access_token,omitempty"`
+		RefreshToken        string          `json:"refresh_token,omitempty"`
+		TokenType           string          `json:"token_type,omitempty"`
+		UserID              string          `json:"user_id,omitempty"`
+		BotUserID           string          `json:"bot_user_id,omitempty"`
+		TeamID              string          `json:"team_id,omitempty"`
+		TeamName            string          `json:"team_name,omitempty"`
+		AppToken            string          `json:"app_token,omitempty"`
+		LastSeen            json.RawMessage `json:"last_seen,omitempty"`
+		ReadAppMentionsOnly *bool           `json:"read_app_mentions_only,omitempty"`
+		ReadDMs             *bool           `json:"read_dms,omitempty"`
+		ReadPrivateChannels *bool           `json:"read_private_channels,omitempty"`
+		ReadMessageGroups   *bool           `json:"read_message_groups,omitempty"`
+	}
+
+	var compat configCompat
+	if err := json.Unmarshal(data, &compat); err != nil {
+		return err
+	}
+
+	*cfg = Config{
+		ClientID:            compat.ClientID,
+		RedirectURI:         compat.RedirectURI,
+		Scopes:              compat.Scopes,
+		BotScopes:           compat.BotScopes,
+		AccessToken:         compat.AccessToken,
+		UserAccessToken:     compat.UserAccessToken,
+		BotAccessToken:      compat.BotAccessToken,
+		RefreshToken:        compat.RefreshToken,
+		TokenType:           compat.TokenType,
+		UserID:              compat.UserID,
+		BotUserID:           compat.BotUserID,
+		TeamID:              compat.TeamID,
+		TeamName:            compat.TeamName,
+		AppToken:            compat.AppToken,
+		ReadAppMentionsOnly: compat.ReadAppMentionsOnly,
+		ReadDMs:             compat.ReadDMs,
+		ReadPrivateChannels: compat.ReadPrivateChannels,
+		ReadMessageGroups:   compat.ReadMessageGroups,
+	}
+	return cfg.unmarshalLastSeen(compat.LastSeen)
+}
+
+func (cfg *Config) unmarshalLastSeen(raw json.RawMessage) error {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+
+	var lastSeen string
+	if err := json.Unmarshal(raw, &lastSeen); err == nil {
+		cfg.LastSeen = strings.TrimSpace(lastSeen)
+		return nil
+	}
+
+	var legacy map[string]string
+	if err := json.Unmarshal(raw, &legacy); err != nil {
+		return err
+	}
+	for _, ts := range legacy {
+		ts = strings.TrimSpace(ts)
+		if isSlackTS(ts) && slackTSGreater(ts, cfg.LastSeen) {
+			cfg.LastSeen = ts
+		}
+	}
+	return nil
 }
 
 type authTestResponse struct {
@@ -140,7 +215,7 @@ func runSetup(reader io.Reader) error {
 		AccessToken:         botToken,
 		BotAccessToken:      botToken,
 		AppToken:            appToken,
-		LastSeen:            map[string]string{},
+		LastSeen:            slackTimestamp(time.Now()),
 		ReadAppMentionsOnly: boolPtr(readAppMentionsOnly),
 		ReadDMs:             boolPtr(readDMs),
 		ReadPrivateChannels: boolPtr(readPrivateChannels),
