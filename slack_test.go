@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -56,6 +57,108 @@ func TestPostMessageMrkdwn(t *testing.T) {
 				t.Fatalf("postMessage returned error: %v", err)
 			}
 		})
+	}
+}
+
+func TestFetchConversationHistoryBacksOffOnRateLimit(t *testing.T) {
+	oldSleep := historyRateLimitSleep
+	t.Cleanup(func() { historyRateLimitSleep = oldSleep })
+
+	var delays []time.Duration
+	historyRateLimitSleep = func(ctx context.Context, d time.Duration) error {
+		delays = append(delays, d)
+		return nil
+	}
+
+	requests := 0
+	client := &SlackClient{
+		Token: "xoxb-test",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			if req.URL.Path != "/api/conversations.history" {
+				t.Fatalf("unexpected path: %s", req.URL.Path)
+			}
+			if requests <= 2 {
+				header := make(http.Header)
+				header.Set("Retry-After", "3")
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     header,
+					Body:       io.NopCloser(strings.NewReader(`{"ok":false,"error":"ratelimited"}`)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true,"messages":[{"type":"message","text":"hello","ts":"1.23"}]}`)),
+			}, nil
+		})},
+	}
+
+	messages, err := fetchConversationHistory(context.Background(), client, "C123", HistoryOptions{})
+	if err != nil {
+		t.Fatalf("fetchConversationHistory returned error: %v", err)
+	}
+	if requests != 3 {
+		t.Fatalf("requests = %d, want 3", requests)
+	}
+	wantDelays := []time.Duration{3 * time.Second, 3 * time.Second}
+	if len(delays) != len(wantDelays) {
+		t.Fatalf("delays = %v, want %v", delays, wantDelays)
+	}
+	for i := range wantDelays {
+		if delays[i] != wantDelays[i] {
+			t.Fatalf("delays = %v, want %v", delays, wantDelays)
+		}
+	}
+	if len(messages) != 1 || messages[0].Text != "hello" {
+		t.Fatalf("messages = %#v", messages)
+	}
+}
+
+func TestFetchConversationHistoryUsesExponentialBackoffWhenRetryAfterIsShort(t *testing.T) {
+	oldSleep := historyRateLimitSleep
+	t.Cleanup(func() { historyRateLimitSleep = oldSleep })
+
+	var delays []time.Duration
+	historyRateLimitSleep = func(ctx context.Context, d time.Duration) error {
+		delays = append(delays, d)
+		return nil
+	}
+
+	requests := 0
+	client := &SlackClient{
+		Token: "xoxb-test",
+		HTTPClient: &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+			requests++
+			if requests <= 3 {
+				header := make(http.Header)
+				header.Set("Retry-After", "1")
+				return &http.Response{
+					StatusCode: http.StatusTooManyRequests,
+					Header:     header,
+					Body:       io.NopCloser(strings.NewReader(`{"ok":false,"error":"ratelimited"}`)),
+				}, nil
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true,"messages":[]}`)),
+			}, nil
+		})},
+	}
+
+	if _, err := fetchConversationHistory(context.Background(), client, "C123", HistoryOptions{}); err != nil {
+		t.Fatalf("fetchConversationHistory returned error: %v", err)
+	}
+	wantDelays := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	if len(delays) != len(wantDelays) {
+		t.Fatalf("delays = %v, want %v", delays, wantDelays)
+	}
+	for i := range wantDelays {
+		if delays[i] != wantDelays[i] {
+			t.Fatalf("delays = %v, want %v", delays, wantDelays)
+		}
 	}
 }
 

@@ -12,11 +12,29 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 const slackAPIBase = "https://slack.com/api/"
 
+const (
+	historyRateLimitMaxRetries     = 5
+	historyRateLimitInitialBackoff = time.Second
+	historyRateLimitMaxBackoff     = time.Minute
+)
+
 var errAttachmentIsHTML = errors.New("attachment response was html")
+
+var historyRateLimitSleep = func(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 type SlackClient struct {
 	HTTPClient *http.Client
@@ -26,6 +44,16 @@ type SlackClient struct {
 type slackErrorResponse struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error"`
+}
+
+type slackRateLimitError struct {
+	Method     string
+	RetryAfter time.Duration
+	Body       string
+}
+
+func (e *slackRateLimitError) Error() string {
+	return fmt.Sprintf("%s failed: http %d: retry after %s: %s", e.Method, http.StatusTooManyRequests, e.RetryAfter, e.Body)
 }
 
 type conversationsListResponse struct {
@@ -261,7 +289,7 @@ func fetchConversationHistory(ctx context.Context, client *SlackClient, channelI
 	}
 
 	var out conversationHistoryResponse
-	if err := client.apiGet(ctx, "conversations.history", params, &out); err != nil {
+	if err := client.apiGetHistoryWithBackoff(ctx, params, &out); err != nil {
 		return nil, err
 	}
 	return out.Messages, nil
@@ -438,6 +466,35 @@ func (c *SlackClient) apiGet(ctx context.Context, method string, params url.Valu
 	return c.doJSON(req, method, out)
 }
 
+func (c *SlackClient) apiGetHistoryWithBackoff(ctx context.Context, params url.Values, out interface{}) error {
+	backoff := historyRateLimitInitialBackoff
+	for attempt := 0; ; attempt++ {
+		err := c.apiGet(ctx, "conversations.history", params, out)
+		if err == nil {
+			return nil
+		}
+
+		var rateLimitErr *slackRateLimitError
+		if !errors.As(err, &rateLimitErr) || attempt >= historyRateLimitMaxRetries {
+			return err
+		}
+
+		delay := backoff
+		if rateLimitErr.RetryAfter > delay {
+			delay = rateLimitErr.RetryAfter
+		}
+		fmt.Fprintf(os.Stderr, "slackie: conversations.history rate limited (429); retrying in %s (attempt %d/%d)\n", delay, attempt+1, historyRateLimitMaxRetries)
+		if err := historyRateLimitSleep(ctx, delay); err != nil {
+			return fmt.Errorf("conversations.history rate limit backoff: %w", err)
+		}
+
+		backoff *= 2
+		if backoff > historyRateLimitMaxBackoff {
+			backoff = historyRateLimitMaxBackoff
+		}
+	}
+}
+
 func (c *SlackClient) apiForm(ctx context.Context, method string, form url.Values, out interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, slackAPIBase+method, strings.NewReader(form.Encode()))
 	if err != nil {
@@ -565,7 +622,7 @@ func (c *SlackClient) doJSON(req *http.Request, method string, out interface{}) 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return fmt.Errorf("%s failed: http %d: retry after %s: %s", method, resp.StatusCode, retryAfter, strings.TrimSpace(string(body)))
+		return &slackRateLimitError{Method: method, RetryAfter: retryAfter, Body: strings.TrimSpace(string(body))}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
