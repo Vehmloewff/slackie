@@ -25,7 +25,7 @@ printf 'no you must pay the full $50, or im going to burn down your gazebo also'
 # Mention a user in a channel by including their Slack mention in the message body.
 printf 'payment received from <@brad>' | slackie send "#mediation"
 
-# Reply in a thread using the channel and timestamp printed by read or send.
+# Reply in a thread using the threading target printed by read or send.
 printf "thx brad" | slackie send "#mediation:1740000000.123456"
 
 # Send stdin with an attachment using --attach.
