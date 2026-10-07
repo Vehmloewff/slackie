@@ -1,36 +1,39 @@
 # slackie
 
-Tiny Slack CLI that can read and send messages. Supports attachments and notifications.
+Tiny Slack CLI for reading and sending messages. Built with Rust, Tokio, and [`err`](https://github.com/Vehmloewff/err) error handling.
 
-During setup, you can choose whether the Slack app should receive only messages that mention the bot or all messages from channels the app is installed in and subscribed to. You can also choose whether to allow receiving DMs, private-channel messages, and multi-person DM/message-group messages.
+## Build
+
+```sh
+cargo build --release
+```
+
+Binary: `target/release/slackie`.
 
 ## Usage
 
 ```sh
-# Authorize slackie with Slack before sending or receiving messages. I'll guide you through configuring and installing the slack app.
+# Create a Slack app from the generated manifest and save its tokens
 slackie setup
 
-# Print unread messages.
+# Print unread messages, or wait for the next matching Socket Mode event
 slackie read
-
-# Wait for the next unread message if there is nothing to print yet.
 slackie read --wait
 
-# Send stdin to a channel; channel names are prefixed with #.
-printf 'approved, but not more than $50' | slackie send "#team-chat"
+# Send stdin text to a channel or user
+printf 'hello' | slackie send "#team-chat"
+printf 'hello' | slackie send "@brad"
 
-# Send stdin to a user; user names are prefixed with @.
-printf 'no you must pay the full $50, or im going to burn down your gazebo also' | slackie send "@brad"
+# Reply in a thread using target printed by read/send
+printf 'thanks' | slackie send "#team-chat:1740000000.123456"
 
-# Mention a user in a channel by including their Slack mention in the message body.
-printf 'payment received from <@brad>' | slackie send "#mediation"
+# Upload local files with optional message text
+printf 'see attached' | slackie send --attach image.png "@brad"
 
-# Reply in a thread using the threading target printed by read or send.
-printf "thx brad" | slackie send "#mediation:1740000000.123456"
-
-# Send stdin with an attachment using --attach.
-printf 'also, what in the world did you do to my toilet?' | slackie send --attach IMG_87812.png "@brad"
-
-# Remove local Slack credentials so setup can be performed again.
+# Remove saved credentials
 slackie reset
 ```
+
+`send` accepts channel names (`#channel`), user names (`@user`), Slack conversation IDs, and user IDs. Repeat `--attach` for multiple files; use `--no-mrkdwn` to disable Slack mrkdwn in text messages.
+
+`send` resolves user mentions written as `<@alice>` or `<@Alice Baker>` to Slack user IDs. `setup` writes credentials to `$XDG_CONFIG_HOME/slackie/config.json`, or `~/.config/slackie/config.json` when `XDG_CONFIG_HOME` is unset. Config file permissions are restricted to the current user on Unix.
