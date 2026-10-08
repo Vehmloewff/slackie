@@ -1,0 +1,18 @@
+[package]
+name = "slackie"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "slackie"
+path = "main.rs"
+
+[dependencies]
+err = { git = "https://github.com/Vehmloewff/err" }
+futures-util = "0.3"
+reqwest = { version = "0.12", features = ["json", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+url = "2"
