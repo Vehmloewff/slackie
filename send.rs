@@ -1,9 +1,10 @@
+use crate::error::{error_report, AppError, Result};
 use crate::{
-    config::{load_config, token},
+    config::load_config,
     slack::Slack,
     unreads::{list_convs, list_users},
 };
-use err::{Err, Result, ResultExt};
+use error_stack::{Report, ResultExt};
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf};
 use tokio::io::AsyncReadExt;
@@ -18,14 +19,14 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
             "--attach" => {
                 i += 1;
                 if i >= args.len() {
-                    return Err(Err::new("usage: slackie send [--attach PATH] <target>"));
+                    return Err(error_report("usage: slackie send [--attach PATH] <target>"));
                 }
                 files.push(args[i].clone())
             }
             v if v.starts_with("--attach=") => files.push(v[9..].to_string()),
             v if target.is_empty() => target = v.into(),
             _ => {
-                return Err(Err::new(
+                return Err(error_report(
                     "usage: slackie send [--attach PATH ...] [--no-mrkdwn] <target>",
                 ))
             }
@@ -33,19 +34,20 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
         i += 1
     }
     if target.is_empty() {
-        return Err(Err::new("send requires target"));
+        return Err(error_report("send requires target"));
     }
     let mut text = String::new();
     tokio::io::stdin()
         .read_to_string(&mut text)
         .await
-        .wrap("read stdin")?;
+        .map_err(Report::new)
+        .change_context(AppError::Context("read stdin"))?;
     let mut text = text.trim_end_matches(['\r', '\n']).to_string();
     if text.trim().is_empty() && files.is_empty() {
-        return Err(Err::new("nothing to send"));
+        return Err(error_report("nothing to send"));
     }
     let c = load_config()?;
-    let s = Slack::new(token(&c))?;
+    let s = Slack::for_config(&c)?;
     text = resolve_user_mentions(&s, &text).await?;
     let (base, thread) = split_thread(&target);
     let (channel, title) = if let Some(n) = base.strip_prefix('#') {
@@ -53,7 +55,7 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
         let cv = cs
             .iter()
             .find(|x| x.name == n)
-            .ok_or_else(|| Err::from_error(format!("channel not found: {base}")))?;
+            .ok_or_else(|| error_report(format!("channel not found: {base}")))?;
         (cv.id.clone(), base.to_string())
     } else if base.starts_with('@') {
         let u = base.trim_start_matches('@');
@@ -65,7 +67,7 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
                     || x.real_name.eq_ignore_ascii_case(u)
                     || x.profile.display_name.eq_ignore_ascii_case(u)
             })
-            .ok_or_else(|| Err::from_error(format!("user not found: {base}")))?;
+            .ok_or_else(|| error_report(format!("user not found: {base}")))?;
         let d: Value = s
             .call("conversations.open", &[("users", found.id.clone())])
             .await?;
@@ -113,11 +115,13 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
             }
         }
         for (idx, path) in files.iter().enumerate() {
-            let bytes = fs::read(path).wrap("read attachment")?;
+            let bytes = fs::read(path)
+                .map_err(Report::new)
+                .change_context(AppError::Context("read attachment"))?;
             let filename = PathBuf::from(path)
                 .file_name()
                 .and_then(|n| n.to_str())
-                .ok_or_else(|| Err::new("attachment has invalid filename"))?
+                .ok_or_else(|| error_report("attachment has invalid filename"))?
                 .to_owned();
             let length = bytes.len().to_string();
             let upload: Value = s
@@ -128,26 +132,27 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
                 .await?;
             let upload_url = upload["upload_url"]
                 .as_str()
-                .ok_or_else(|| Err::new("Slack returned no upload URL"))?;
+                .ok_or_else(|| error_report("Slack returned no upload URL"))?;
             let file_id = upload["file_id"]
                 .as_str()
-                .ok_or_else(|| Err::new("Slack returned no file ID"))?;
-            let response = s
-                .http
-                .post(upload_url)
-                .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-                .body(bytes)
-                .send()
-                .await
-                .wrap("upload attachment bytes")?;
+                .ok_or_else(|| error_report("Slack returned no file ID"))?;
+            let response = crate::slack::send_with_retry(
+                s.http
+                    .post(upload_url)
+                    .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                    .body(bytes),
+            )
+            .await
+            .change_context(AppError::Context("upload attachment bytes"))?;
             if !response.status().is_success() {
-                return Err(Err::from_error(format!(
+                return Err(error_report(format!(
                     "attachment upload failed: HTTP {}",
                     response.status()
                 )));
             }
             let files_json = serde_json::to_string(&json!([{"id":file_id,"title":filename}]))
-                .wrap("encode upload completion")?;
+                .map_err(Report::new)
+                .change_context(AppError::Context("encode upload completion"))?;
             let mut form = vec![("files", files_json), ("channel_id", channel.clone())];
             if !thread.is_empty() {
                 form.push(("thread_ts", thread.clone()));
@@ -176,7 +181,7 @@ async fn resolve_user_mentions(s: &Slack, text: &str) -> Result<String> {
     }
     let users = list_users(s)
         .await
-        .wrap("load users for mention resolution")?;
+        .change_context(AppError::Context("load users for mention resolution"))?;
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("<@") {
@@ -212,7 +217,7 @@ async fn resolve_user_mentions(s: &Slack, text: &str) -> Result<String> {
                 })
                 .collect();
             if matches.len() != 1 {
-                return Err(Err::from_error(if matches.is_empty() {
+                return Err(error_report(if matches.is_empty() {
                     format!("User not found: {name}")
                 } else {
                     format!("multiple users matched <@{name}>")

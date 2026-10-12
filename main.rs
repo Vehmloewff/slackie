@@ -1,5 +1,6 @@
 mod auth;
 mod config;
+mod error;
 mod manifest;
 mod send;
 mod slack;
@@ -8,7 +9,8 @@ mod unreads;
 
 use auth::setup;
 use config::config_path;
-use err::{Err, Result};
+use error::{error_report, AppError, Result};
+use error_stack::Report;
 use send::send;
 use std::{env, fs, io};
 use unreads::read;
@@ -79,6 +81,14 @@ fn help() {
 }
 #[tokio::main]
 async fn main() {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or(
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "info"
+        },
+    ))
+    .init();
     if let Err(e) = run().await {
         eprintln!("error: {e:?}");
         std::process::exit(1)
@@ -99,17 +109,19 @@ async fn run() -> Result<()> {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {
                     println!("No config found: {}", p.display())
                 }
-                Err(e) => return Err(Err::from_error(e).wrap("remove config")),
+                Err(e) => {
+                    return Err(Report::new(e).change_context(AppError::Context("remove config")))
+                }
             }
             Ok(())
         }
         Some("read") => {
             if a.len() > 2 || a.get(1).is_some_and(|x| x != "--wait") {
-                return Err(Err::new("usage: slackie read [--wait]"));
+                return Err(error_report("usage: slackie read [--wait]"));
             }
             read(a.get(1).is_some_and(|x| x == "--wait")).await
         }
         Some("send") => send(&a[1..]).await,
-        Some(cmd) => Err(Err::from_error(format!("unknown command: {cmd}"))),
+        Some(cmd) => Err(error_report(format!("unknown command: {cmd}"))),
     }
 }
