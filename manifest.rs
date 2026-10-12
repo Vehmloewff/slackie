@@ -36,7 +36,7 @@ fn scopes(s: &Config) -> (Vec<&'static str>, Vec<&'static str>) {
     }
     (sc, ev)
 }
-pub(crate) fn manifest(name: &str, s: &Config) -> Value {
+pub fn manifest(name: &str, s: &Config) -> Value {
     let (sc, ev) = scopes(s);
     let mut features = json!({"bot_user":{"display_name":name,"always_online":false}});
     if s.read_dms {

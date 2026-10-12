@@ -1,14 +1,16 @@
+use crate::db::Db;
 use crate::error::{error_report, AppError, Result};
-use crate::{
-    config::load_config,
-    slack::Slack,
-    unreads::{list_convs, list_users},
-};
+use crate::lists::{list_convs, list_users};
+use crate::slack::Slack;
 use error_stack::{Report, ResultExt};
 use serde_json::{json, Value};
+use std::fmt::Write;
 use std::{fs, path::PathBuf};
-use tokio::io::AsyncReadExt;
-pub(crate) async fn send(args: &[String]) -> Result<()> {
+
+/// Send stdin text (already read by the client) to a channel, user, or
+/// conversation id. Resolves targets against the local store first and
+/// falls back to the Slack API. Returns the lines the client should print.
+pub async fn send(db: &Db, args: &[String], text: &str) -> Result<String> {
     let mut target = String::new();
     let mut files = vec![];
     let mut mrkdwn = true;
@@ -36,38 +38,27 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
     if target.is_empty() {
         return Err(error_report("send requires target"));
     }
-    let mut text = String::new();
-    tokio::io::stdin()
-        .read_to_string(&mut text)
-        .await
-        .map_err(Report::new)
-        .change_context(AppError::Context("read stdin"))?;
-    let mut text = text.trim_end_matches(['\r', '\n']).to_string();
+    let text = text.trim_end_matches(['\r', '\n']).to_string();
     if text.trim().is_empty() && files.is_empty() {
         return Err(error_report("nothing to send"));
     }
-    let c = load_config()?;
+    let c = crate::config::load_config()?;
     let s = Slack::for_config(&c)?;
-    text = resolve_user_mentions(&s, &text).await?;
+    let text = resolve_user_mentions(&s, db, &text).await?;
     let (base, thread) = split_thread(&target);
     let (channel, title) = if let Some(n) = base.strip_prefix('#') {
-        let cs = list_convs(&s, &c).await?;
-        let cv = cs
-            .iter()
-            .find(|x| x.name == n)
-            .ok_or_else(|| error_report(format!("channel not found: {base}")))?;
+        let cv = match db.find_channel_by_name(n).await? {
+            Some(cv) => Some(cv),
+            None => {
+                let cs = list_convs(&s, &c).await?;
+                cs.into_iter().find(|x| x.name == n)
+            }
+        };
+        let cv = cv.ok_or_else(|| error_report(format!("channel not found: {base}")))?;
         (cv.id.clone(), base.to_string())
     } else if base.starts_with('@') {
         let u = base.trim_start_matches('@');
-        let us = list_users(&s).await?;
-        let found = us
-            .iter()
-            .find(|x| {
-                x.name.eq_ignore_ascii_case(u)
-                    || x.real_name.eq_ignore_ascii_case(u)
-                    || x.profile.display_name.eq_ignore_ascii_case(u)
-            })
-            .ok_or_else(|| error_report(format!("user not found: {base}")))?;
+        let found = find_user(&s, db, u).await?;
         let d: Value = s
             .call("conversations.open", &[("users", found.id.clone())])
             .await?;
@@ -78,6 +69,7 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
     } else {
         (base.to_string(), base.to_string())
     };
+    let mut out = String::new();
     if files.is_empty() {
         let mut form = vec![
             ("channel", channel.clone()),
@@ -88,15 +80,16 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
             form.push(("thread_ts", thread.clone()));
         }
         let r: Value = s.call("chat.postMessage", &form).await?;
-        println!(
-            "sent to {title} (threading target: {}:{})",
-            title,
+        writeln!(
+            out,
+            "sent to {title} (threading target: {title}:{})",
             if thread.is_empty() {
                 r["ts"].as_str().unwrap_or("")
             } else {
                 &thread
             }
-        );
+        )
+        .map_err(|_| error_report("format output"))?;
     } else {
         if !mrkdwn && !text.is_empty() {
             let mut form = vec![
@@ -110,7 +103,8 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
             let posted: Value = s.call("chat.postMessage", &form).await?;
             if thread.is_empty() {
                 if let Some(ts) = posted["ts"].as_str() {
-                    println!("sent text to {title} (threading target: {title}:{ts})");
+                    writeln!(out, "sent text to {title} (threading target: {title}:{ts})")
+                        .map_err(|_| error_report("format output"))?;
                 }
             }
         }
@@ -136,14 +130,15 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
             let file_id = upload["file_id"]
                 .as_str()
                 .ok_or_else(|| error_report("Slack returned no file ID"))?;
-            let response = crate::slack::send_with_retry(
-                s.http
-                    .post(upload_url)
-                    .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
-                    .body(bytes),
-            )
-            .await
-            .change_context(AppError::Context("upload attachment bytes"))?;
+            let response = s
+                .send(
+                    s.http
+                        .post(upload_url)
+                        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+                        .body(bytes),
+                )
+                .await
+                .change_context(AppError::Context("upload attachment bytes"))?;
             if !response.status().is_success() {
                 return Err(error_report(format!(
                     "attachment upload failed: HTTP {}",
@@ -167,21 +162,64 @@ pub(crate) async fn send(args: &[String]) -> Result<()> {
                 file_share_ts(&completed, &channel)
             };
             if let Some(ts) = ts {
-                println!("uploaded {path} to {title} (threading target: {title}:{ts})");
+                writeln!(
+                    out,
+                    "uploaded {path} to {title} (threading target: {title}:{ts})"
+                )
+                .map_err(|_| error_report("format output"))?;
             } else {
-                println!("uploaded {path} to {title} (file id: {file_id})");
+                writeln!(out, "uploaded {path} to {title} (file id: {file_id})")
+                    .map_err(|_| error_report("format output"))?;
             }
         }
     }
-    Ok(())
+    Ok(out)
 }
-async fn resolve_user_mentions(s: &Slack, text: &str) -> Result<String> {
+
+/// Resolve `@name` against the local user store, falling back to a fresh
+/// `users.list` from Slack.
+async fn find_user(s: &Slack, db: &Db, name: &str) -> Result<crate::slack::User> {
+    let matches = |users: &[crate::slack::User]| -> Vec<crate::slack::User> {
+        users
+            .iter()
+            .filter(|u| {
+                !u.deleted
+                    && [
+                        u.name.as_str(),
+                        u.real_name.as_str(),
+                        u.profile.real_name.as_str(),
+                        u.profile.display_name.as_str(),
+                        u.profile.display_name_normalized.as_str(),
+                    ]
+                    .iter()
+                    .any(|candidate| candidate.eq_ignore_ascii_case(name))
+            })
+            .cloned()
+            .collect()
+    };
+    let mut found = matches(&db.users().await?);
+    if found.is_empty() {
+        found = matches(&list_users(s).await?);
+    }
+    match found.len() {
+        1 => Ok(found.into_iter().next().unwrap()),
+        0 => Err(error_report(format!("user not found: @{name}"))),
+        _ => Err(error_report(format!("multiple users matched @{name}"))),
+    }
+}
+
+async fn resolve_user_mentions(s: &Slack, db: &Db, text: &str) -> Result<String> {
     if !text.contains("<@") {
         return Ok(text.to_owned());
     }
-    let users = list_users(s)
-        .await
-        .change_context(AppError::Context("load users for mention resolution"))?;
+    let users = db.users().await?;
+    let users = if users.is_empty() {
+        list_users(s)
+            .await
+            .change_context(AppError::Context("load users for mention resolution"))?
+    } else {
+        users
+    };
     let mut output = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(start) = rest.find("<@") {
@@ -231,7 +269,7 @@ async fn resolve_user_mentions(s: &Slack, text: &str) -> Result<String> {
     Ok(output)
 }
 
-pub(crate) fn file_share_ts<'a>(response: &'a Value, channel: &str) -> Option<&'a str> {
+pub fn file_share_ts<'a>(response: &'a Value, channel: &str) -> Option<&'a str> {
     for visibility in ["public", "private"] {
         let shares = &response["files"][0]["shares"][visibility];
         let entries = shares[channel]
@@ -251,7 +289,7 @@ pub(crate) fn file_share_ts<'a>(response: &'a Value, channel: &str) -> Option<&'
     None
 }
 
-pub(crate) fn split_thread(t: &str) -> (&str, String) {
+pub fn split_thread(t: &str) -> (&str, String) {
     if let Some((a, b)) = t.rsplit_once(':') {
         if b.contains('.') && b.chars().all(|c| c.is_ascii_digit() || c == '.') {
             return (a, b.into());

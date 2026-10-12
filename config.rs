@@ -7,47 +7,68 @@ use std::{
     path::PathBuf,
 };
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct Config {
+pub struct Config {
     #[serde(default)]
-    pub(crate) access_token: String,
+    pub access_token: String,
     #[serde(default)]
-    pub(crate) bot_access_token: String,
+    pub bot_access_token: String,
     #[serde(default)]
-    pub(crate) app_token: String,
+    pub app_token: String,
     #[serde(default)]
-    pub(crate) session_token: String,
+    pub session_token: String,
     #[serde(default)]
-    pub(crate) session_cookie: String,
+    pub session_cookie: String,
     #[serde(default)]
-    pub(crate) bot_user_id: String,
+    pub bot_user_id: String,
     #[serde(default)]
-    pub(crate) user_id: String,
+    pub user_id: String,
     #[serde(default)]
-    pub(crate) team_id: String,
+    pub team_id: String,
     #[serde(default)]
-    pub(crate) team_name: String,
+    pub team_name: String,
     #[serde(default)]
-    pub(crate) last_seen: String,
+    pub last_seen: String,
     #[serde(default = "yes")]
-    pub(crate) read_app_mentions_only: bool,
+    pub read_app_mentions_only: bool,
     #[serde(default = "yes")]
-    pub(crate) read_dms: bool,
+    pub read_dms: bool,
     #[serde(default = "yes")]
-    pub(crate) read_private_channels: bool,
+    pub read_private_channels: bool,
     #[serde(default = "yes")]
-    pub(crate) read_message_groups: bool,
+    pub read_message_groups: bool,
 }
 fn yes() -> bool {
     true
 }
-pub(crate) fn config_path() -> Result<PathBuf> {
+pub fn config_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("config.json"))
+}
+pub fn config_dir() -> Result<PathBuf> {
     let base = env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .ok_or_else(|| error_report("cannot resolve config directory"))?;
-    Ok(base.join("slackie").join("config.json"))
+    Ok(base.join("slackie"))
 }
-pub(crate) fn save_config(c: &Config) -> Result<()> {
+/// Unix socket the slackie client uses to reach the slackied daemon.
+pub fn socket_path() -> Result<PathBuf> {
+    Ok(config_dir()?.join("slackie.sock"))
+}
+/// Directory for daemon state (message store, log file).
+pub fn state_dir() -> Result<PathBuf> {
+    let base = env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|h| PathBuf::from(h).join(".local").join("state")))
+        .ok_or_else(|| error_report("cannot resolve state directory"))?;
+    Ok(base.join("slackie"))
+}
+pub fn db_path() -> Result<PathBuf> {
+    Ok(state_dir()?.join("store.db"))
+}
+pub fn log_path() -> Result<PathBuf> {
+    Ok(state_dir()?.join("slackied.log"))
+}
+pub fn save_config(c: &Config) -> Result<()> {
     let p = config_path()?;
     fs::create_dir_all(p.parent().unwrap())
         .map_err(Report::new)
@@ -78,7 +99,7 @@ pub(crate) fn save_config(c: &Config) -> Result<()> {
         .change_context(AppError::Context("write config"))?;
     Ok(())
 }
-pub(crate) fn load_config() -> Result<Config> {
+pub fn load_config() -> Result<Config> {
     let p = config_path()?;
     let data = fs::read(&p)
         .map_err(Report::new)
@@ -94,17 +115,17 @@ pub(crate) fn load_config() -> Result<Config> {
     }
     Ok(c)
 }
-pub(crate) fn token(c: &Config) -> &str {
+pub fn token(c: &Config) -> &str {
     if !c.bot_access_token.is_empty() {
         &c.bot_access_token
     } else {
         &c.access_token
     }
 }
-pub(crate) fn is_session(c: &Config) -> bool {
+pub fn is_session(c: &Config) -> bool {
     !c.session_cookie.is_empty()
 }
-pub(crate) fn ask(prompt: &str) -> Result<String> {
+pub fn ask(prompt: &str) -> Result<String> {
     print!("{prompt}");
     io::stdout()
         .flush()

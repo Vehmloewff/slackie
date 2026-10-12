@@ -4,19 +4,74 @@ use error_stack::{Report, ResultExt};
 use reqwest::{Client, Method};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::time::Duration;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, SemaphorePermit};
 const API: &str = "https://slack.com/api/";
+/// Minimum delay between the start of two Slack API requests.
+const THROTTLE_SPACING: Duration = Duration::from_millis(200);
+/// Maximum number of Slack API requests in flight at once.
+const THROTTLE_IN_FLIGHT: usize = 4;
+
+/// Shared rate limiter: bounds request start rate and concurrency so that
+/// backfill, live sync, reads, and sends never hammer Slack at once.
+pub struct Throttle {
+    permits: Semaphore,
+    spacing: Duration,
+    next_start: AsyncMutex<Instant>,
+}
+
+pub struct ThrottleSlot<'a> {
+    _permit: SemaphorePermit<'a>,
+}
+
+impl Throttle {
+    fn new() -> Self {
+        Self {
+            permits: Semaphore::new(THROTTLE_IN_FLIGHT),
+            spacing: THROTTLE_SPACING,
+            next_start: AsyncMutex::new(Instant::now()),
+        }
+    }
+    /// Wait until a request slot is allowed, holding it for the request's lifetime.
+    async fn slot(&self) -> ThrottleSlot<'_> {
+        let permit = self
+            .permits
+            .acquire()
+            .await
+            .expect("throttle semaphore closed");
+        let wake = {
+            let mut next = self.next_start.lock().await;
+            let now = Instant::now();
+            let at = if *next > now { *next } else { now };
+            *next = at + self.spacing;
+            at
+        };
+        let now = Instant::now();
+        if wake > now {
+            tokio::time::sleep(wake - now).await;
+        }
+        ThrottleSlot { _permit: permit }
+    }
+}
+
+fn global_throttle() -> Arc<Throttle> {
+    static THROTTLE: OnceLock<Arc<Throttle>> = OnceLock::new();
+    THROTTLE.get_or_init(|| Arc::new(Throttle::new())).clone()
+}
+
 #[derive(Clone)]
-pub(crate) struct Slack {
-    pub(crate) http: Client,
-    pub(crate) token: String,
-    pub(crate) cookie: String,
+pub struct Slack {
+    pub http: Client,
+    pub token: String,
+    pub cookie: String,
+    pub throttle: Arc<Throttle>,
 }
 impl Slack {
-    pub(crate) fn new(token: &str) -> Result<Self> {
+    pub fn new(token: &str) -> Result<Self> {
         Self::with_cookie(token, "")
     }
-    pub(crate) fn with_cookie(token: &str, cookie: &str) -> Result<Self> {
+    pub fn with_cookie(token: &str, cookie: &str) -> Result<Self> {
         Ok(Self {
             http: Client::builder()
                 .timeout(Duration::from_secs(30))
@@ -25,16 +80,17 @@ impl Slack {
                 .map_err(Report::new).change_context(AppError::Context("build HTTP client"))?,
             token: token.into(),
             cookie: cookie.into(),
+            throttle: global_throttle(),
         })
     }
-    pub(crate) fn for_config(c: &Config) -> Result<Self> {
+    pub fn for_config(c: &Config) -> Result<Self> {
         if is_session(c) {
             Self::with_cookie(token(c), &c.session_cookie)
         } else {
             Self::new(token(c))
         }
     }
-    pub(crate) fn auth(&self, r: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    pub fn auth(&self, r: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let r = r.bearer_auth(&self.token);
         if self.cookie.is_empty() {
             r
@@ -42,7 +98,7 @@ impl Slack {
             r.header(reqwest::header::COOKIE, format!("d={}", self.cookie))
         }
     }
-    pub(crate) async fn call<T: for<'de> Deserialize<'de>>(
+    pub async fn call<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
         form: &[(&str, String)],
@@ -50,7 +106,7 @@ impl Slack {
         let r = self
             .auth(self.http.request(Method::POST, format!("{API}{method}")))
             .form(form);
-        let response = send_with_retry(r).await?;
+        let response = self.send(r).await?;
         let status = response.status();
         let v: Value = response
             .json()
@@ -70,7 +126,7 @@ impl Slack {
             .map_err(Report::new)
             .change_context(AppError::Context("decode Slack API result"))
     }
-    pub(crate) async fn get<T: for<'de> Deserialize<'de>>(
+    pub async fn get<T: for<'de> Deserialize<'de>>(
         &self,
         method: &str,
         params: &[(&str, String)],
@@ -78,7 +134,7 @@ impl Slack {
         let r = self
             .auth(self.http.get(format!("{API}{method}")))
             .query(params);
-        let response = send_with_retry(r).await?;
+        let response = self.send(r).await?;
         let status = response.status();
         let v: Value = response
             .json()
@@ -95,164 +151,191 @@ impl Slack {
             .map_err(Report::new)
             .change_context(AppError::Context("decode Slack API result"))
     }
-}
-pub(crate) async fn send_with_retry(r: reqwest::RequestBuilder) -> Result<reqwest::Response> {
-    for attempt in 0..6u32 {
-        let req = r
-            .try_clone()
-            .ok_or_else(|| error_report("request body not repeatable"))?
-            .build()
-            .map_err(Report::new)
-            .change_context(AppError::Context("build Slack API request"))?;
-        let method = req.method().to_string();
-        let mut logged_url = req.url().clone();
-        if !logged_url.path().starts_with("/api/") {
-            logged_url.set_query(None);
-            logged_url.set_fragment(None);
+    /// Send a Slack API (or authenticated CDN) request through the shared
+    /// throttle, retrying rate limits with backoff.
+    pub async fn send(&self, r: reqwest::RequestBuilder) -> Result<reqwest::Response> {
+        for attempt in 0..6u32 {
+            let req = r
+                .try_clone()
+                .ok_or_else(|| error_report("request body not repeatable"))?
+                .build()
+                .map_err(Report::new)
+                .change_context(AppError::Context("build Slack API request"))?;
+            let method = req.method().to_string();
+            let mut logged_url = req.url().clone();
+            if !logged_url.path().starts_with("/api/") {
+                logged_url.set_query(None);
+                logged_url.set_fragment(None);
+            }
+            let url = logged_url.to_string();
+            log::debug!("Slack request: {method} {url}");
+            let slot = self.throttle.slot().await;
+            let started = Instant::now();
+            let response = r
+                .try_clone()
+                .ok_or_else(|| error_report("request body not repeatable"))?
+                .send()
+                .await
+                .map_err(Report::new)
+                .change_context(AppError::Context("send Slack API request"))?;
+            log::debug!(
+                "Slack response: {method} {url} -> {} ({:?})",
+                response.status(),
+                started.elapsed()
+            );
+            if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                let wait = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(u64::from(2 * (attempt + 1)));
+                log::info!("rate limited, retrying in {wait}s (attempt {attempt})");
+                drop(slot);
+                tokio::time::sleep(Duration::from_secs(wait.min(30))).await;
+                continue;
+            }
+            return Ok(response);
         }
-        let url = logged_url.to_string();
-        log::debug!("Slack request: {method} {url}");
-        let started = std::time::Instant::now();
-        let response = r
-            .try_clone()
-            .ok_or_else(|| error_report("request body not repeatable"))?
-            .send()
-            .await
-            .map_err(Report::new)
-            .change_context(AppError::Context("send Slack API request"))?;
-        log::debug!(
-            "Slack response: {method} {url} -> {} ({:?})",
-            response.status(),
-            started.elapsed()
-        );
-        if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let wait = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok())
-                .unwrap_or(u64::from(2 * (attempt + 1)));
-            eprintln!("slackie: rate limited, retrying in {wait}s (attempt {attempt})");
-            tokio::time::sleep(Duration::from_secs(wait.min(30))).await;
-            continue;
-        }
-        return Ok(response);
+        Err(error_report("Slack API rate limited: too many retries"))
     }
-    Err(error_report("Slack API rate limited: too many retries"))
 }
 #[derive(Debug, Deserialize)]
-pub(crate) struct Auth {
+pub struct Auth {
     #[serde(default)]
-    pub(crate) user_id: String,
+    pub user_id: String,
     #[serde(default)]
-    pub(crate) team_id: String,
+    pub team_id: String,
     #[serde(default)]
-    pub(crate) team: String,
+    pub team: String,
 }
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub(crate) struct Conv {
+pub struct Conv {
     #[serde(default)]
-    pub(crate) id: String,
+    pub id: String,
     #[serde(default)]
-    pub(crate) name: String,
+    pub name: String,
     #[serde(default)]
-    pub(crate) user: String,
+    pub user: String,
     #[serde(default)]
-    pub(crate) is_im: bool,
+    pub is_im: bool,
     #[serde(default)]
-    pub(crate) is_mpim: bool,
+    pub is_mpim: bool,
     #[serde(default)]
-    pub(crate) is_group: bool,
+    pub is_group: bool,
     #[serde(default, skip_serializing)]
-    pub(crate) latest: Msg,
+    pub latest: Msg,
 }
 #[derive(Debug, Clone, Default, Deserialize)]
-pub(crate) struct Msg {
+pub struct Msg {
     #[serde(default)]
-    pub(crate) user: String,
+    pub user: String,
     #[serde(default)]
-    pub(crate) text: String,
+    pub text: String,
     #[serde(default)]
-    pub(crate) ts: String,
+    pub ts: String,
     #[serde(default)]
-    pub(crate) thread_ts: String,
+    pub thread_ts: String,
     #[serde(default)]
-    pub(crate) subtype: String,
+    pub reply_count: u64,
     #[serde(default)]
-    pub(crate) username: String,
+    pub subtype: String,
     #[serde(default)]
-    pub(crate) bot_id: String,
+    pub username: String,
     #[serde(default)]
-    pub(crate) files: Vec<SlackFile>,
+    pub bot_id: String,
     #[serde(default)]
-    pub(crate) attachments: Vec<SlackAttachment>,
+    pub files: Vec<SlackFile>,
+    #[serde(default)]
+    pub attachments: Vec<SlackAttachment>,
 }
-#[derive(Debug, Clone, Default, Deserialize)]
-pub(crate) struct SlackFile {
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SlackFile {
     #[serde(default)]
-    pub(crate) name: String,
+    pub name: String,
     #[serde(default)]
-    pub(crate) title: String,
+    pub title: String,
     #[serde(default)]
-    pub(crate) is_external: bool,
+    pub is_external: bool,
     #[serde(default)]
-    pub(crate) url_private: String,
+    pub url_private: String,
     #[serde(default)]
-    pub(crate) url_private_download: String,
+    pub url_private_download: String,
 }
-#[derive(Debug, Clone, Default, Deserialize)]
-pub(crate) struct SlackAttachment {
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SlackAttachment {
     #[serde(default)]
-    pub(crate) title: String,
+    pub title: String,
     #[serde(default)]
-    pub(crate) image_url: String,
+    pub image_url: String,
     #[serde(default)]
-    pub(crate) thumb_url: String,
+    pub thumb_url: String,
 }
 #[derive(Deserialize)]
-pub(crate) struct List<T> {
+pub struct List<T> {
     #[serde(default)]
-    pub(crate) channels: Vec<T>,
+    pub channels: Vec<T>,
     #[serde(default)]
-    pub(crate) response_metadata: Meta,
+    pub response_metadata: Meta,
 }
 #[derive(Default, Deserialize)]
-pub(crate) struct Meta {
+pub struct Meta {
     #[serde(default)]
-    pub(crate) next_cursor: String,
+    pub next_cursor: String,
 }
 #[derive(Deserialize)]
-pub(crate) struct History {
+pub struct History {
     #[serde(default)]
-    pub(crate) messages: Vec<Msg>,
+    pub messages: Vec<Msg>,
     #[serde(default)]
-    pub(crate) response_metadata: Meta,
+    pub response_metadata: Meta,
 }
 #[derive(Deserialize)]
-pub(crate) struct Users {
+pub struct Users {
     #[serde(default)]
-    pub(crate) members: Vec<User>,
+    pub members: Vec<User>,
     #[serde(default)]
-    pub(crate) response_metadata: Meta,
+    pub response_metadata: Meta,
 }
-#[derive(Deserialize)]
-pub(crate) struct User {
-    pub(crate) id: String,
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct User {
+    pub id: String,
     #[serde(default)]
-    pub(crate) name: String,
+    pub name: String,
     #[serde(default)]
-    pub(crate) real_name: String,
+    pub real_name: String,
     #[serde(default)]
-    pub(crate) profile: Profile,
+    pub profile: Profile,
     #[serde(default)]
-    pub(crate) deleted: bool,
+    pub deleted: bool,
 }
-#[derive(Default, Deserialize)]
-pub(crate) struct Profile {
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct Profile {
     #[serde(default)]
-    pub(crate) display_name: String,
+    pub display_name: String,
     #[serde(default)]
-    pub(crate) display_name_normalized: String,
+    pub display_name_normalized: String,
     #[serde(default)]
-    pub(crate) real_name: String,
+    pub real_name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Throttle;
+    use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn throttle_spaces_out_request_starts() {
+        let throttle = Throttle::new();
+        let start = Instant::now();
+        let mut marks = Vec::new();
+        for _ in 0..4 {
+            let slot = throttle.slot().await;
+            marks.push(start.elapsed());
+            drop(slot);
+        }
+        assert!(marks[0] < Duration::from_millis(100), "{marks:?}");
+        // Every later request start is spaced by at least THROTTLE_SPACING.
+        assert!(marks[3] >= Duration::from_millis(600), "{marks:?}");
+    }
 }

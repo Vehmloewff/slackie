@@ -1,12 +1,62 @@
+use crate::config::{self, Config};
 use crate::error::{error_report, AppError, Result};
-use crate::{config::Config, slack::Slack};
+use crate::slack::Slack;
 use error_stack::{Report, ResultExt};
+use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::fs;
+use std::time::Duration;
+use tokio::sync::mpsc::Sender;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-pub(crate) async fn rtm_wait(c: &Config, names: &HashMap<String, String>) -> Result<String> {
-    use futures_util::StreamExt;
+
+/// A message event pulled off the live event stream, destined for the store.
+#[derive(Debug, Clone)]
+pub struct Event {
+    pub channel: String,
+    pub ts: String,
+    pub user: String,
+    pub text: String,
+    pub subtype: String,
+    pub thread_ts: String,
+    pub bot_id: String,
+    pub channel_type: String,
+}
+
+/// Connect to Slack's live event stream and forward message events until the
+/// connection drops. Chooses Socket Mode when an app token exists, otherwise
+/// RTM over the impersonation session.
+pub async fn listen(c: &Config, tx: &Sender<Event>) -> Result<()> {
+    if !c.app_token.is_empty() {
+        socket_mode(c, tx).await
+    } else if !c.session_token.is_empty() {
+        rtm(c, tx).await
+    } else {
+        idle_until_config_changes().await
+    }
+}
+
+/// No event stream is possible without an app-level or session token; idle
+/// until the config changes so the daemon can pick up fresh credentials.
+async fn idle_until_config_changes() -> Result<()> {
+    log::info!("no app-level or session token: no live event stream, relying on periodic sync");
+    let path = config::config_path()?;
+    let mut seen = stamp(&path);
+    loop {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        let now = stamp(&path);
+        if now != seen && now.is_some() {
+            return Ok(());
+        }
+        seen = now;
+    }
+}
+
+fn stamp(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+async fn rtm(c: &Config, tx: &Sender<Event>) -> Result<()> {
     #[derive(Deserialize)]
     struct Connect {
         url: String,
@@ -28,50 +78,16 @@ pub(crate) async fn rtm_wait(c: &Config, names: &HashMap<String, String>) -> Res
         let event: Value = serde_json::from_str(&text)
             .map_err(Report::new)
             .change_context(AppError::Context("decode RTM event"))?;
-        if event["type"].as_str() != Some("message") {
-            continue;
+        if let Some(ev) = parse_event(&event) {
+            tx.send(ev)
+                .await
+                .map_err(|_| error_report("event sink closed"))?;
         }
-        let channel = event["channel"].as_str().unwrap_or("");
-        let ts = event["ts"].as_str().unwrap_or("");
-        let user = event["user"].as_str().unwrap_or("");
-        let text = event["text"].as_str().unwrap_or("");
-        let ctype = event["channel_type"].as_str().unwrap_or("");
-        if channel.is_empty() || ts.is_empty() || user == c.bot_user_id {
-            continue;
-        }
-        if (ctype == "im" && !c.read_dms)
-            || (ctype == "mpim" && !c.read_message_groups)
-            || (ctype == "group" && !c.read_private_channels)
-        {
-            continue;
-        }
-        let mention = !c.bot_user_id.is_empty() && text.contains(&format!("<@{}>", c.bot_user_id));
-        if c.read_app_mentions_only && !matches!(ctype, "im" | "mpim") && !mention {
-            continue;
-        }
-        let name = names.get(user).cloned().unwrap_or_else(|| user.to_owned());
-        let title = if ctype == "im" {
-            format!("@{name}")
-        } else {
-            format!("#{channel}")
-        };
-        println!("[{title}] {ts}: {}", text.replace('\n', " "));
-        let thread_ts = event["thread_ts"]
-            .as_str()
-            .filter(|value| !value.is_empty())
-            .unwrap_or(ts);
-        println!("  threading target: {channel}:{thread_ts}");
-        return Ok(ts.to_owned());
     }
-    Err(error_report(
-        "RTM websocket closed before receiving a message",
-    ))
+    Err(error_report("RTM websocket closed"))
 }
-pub(crate) async fn socket_mode_wait(
-    c: &Config,
-    names: &HashMap<String, String>,
-) -> Result<String> {
-    use futures_util::{SinkExt, StreamExt};
+
+async fn socket_mode(c: &Config, tx: &Sender<Event>) -> Result<()> {
     #[derive(Deserialize)]
     struct Open {
         url: String,
@@ -108,49 +124,36 @@ pub(crate) async fn socket_mode_wait(
                 )))
             }
             "events_api" => {
-                let event = &envelope["payload"]["event"];
-                let channel = event["channel"].as_str().unwrap_or("");
-                let ts = event["ts"].as_str().unwrap_or("");
-                let user = event["user"].as_str().unwrap_or("");
-                let text = event["text"].as_str().unwrap_or("");
-                let ctype = event["channel_type"].as_str().unwrap_or("");
-                if channel.is_empty()
-                    || ts.is_empty()
-                    || user == c.bot_user_id
-                    || !event["bot_id"].as_str().unwrap_or("").is_empty()
-                {
-                    continue;
+                if let Some(ev) = parse_event(&envelope["payload"]["event"]) {
+                    tx.send(ev)
+                        .await
+                        .map_err(|_| error_report("event sink closed"))?;
                 }
-                if (ctype == "im" && !c.read_dms)
-                    || (ctype == "mpim" && !c.read_message_groups)
-                    || (ctype == "group" && !c.read_private_channels)
-                {
-                    continue;
-                }
-                let mention = event["type"] == "app_mention"
-                    || (!c.bot_user_id.is_empty()
-                        && text.contains(&format!("<@{}>", c.bot_user_id)));
-                if c.read_app_mentions_only && !matches!(ctype, "im" | "mpim") && !mention {
-                    continue;
-                }
-                let name = names.get(user).cloned().unwrap_or_else(|| user.to_owned());
-                let title = if ctype == "im" {
-                    format!("@{name}")
-                } else {
-                    format!("#{channel}")
-                };
-                println!("[{title}] {ts}: {}", text.replace('\n', " "));
-                let thread_ts = event["thread_ts"]
-                    .as_str()
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or(ts);
-                println!("  threading target: {channel}:{thread_ts}");
-                return Ok(ts.to_owned());
             }
             _ => continue,
         }
     }
-    Err(error_report(
-        "Socket Mode websocket closed before receiving a message",
-    ))
+    Err(error_report("Socket Mode websocket closed"))
+}
+
+fn parse_event(event: &Value) -> Option<Event> {
+    let kind = event["type"].as_str()?;
+    if kind != "message" && kind != "app_mention" {
+        return None;
+    }
+    let channel = event["channel"].as_str()?;
+    let ts = event["ts"].as_str()?;
+    if channel.is_empty() || ts.is_empty() {
+        return None;
+    }
+    Some(Event {
+        channel: channel.to_owned(),
+        ts: ts.to_owned(),
+        user: event["user"].as_str().unwrap_or("").to_owned(),
+        text: event["text"].as_str().unwrap_or("").to_owned(),
+        subtype: event["subtype"].as_str().unwrap_or("").to_owned(),
+        thread_ts: event["thread_ts"].as_str().unwrap_or("").to_owned(),
+        bot_id: event["bot_id"].as_str().unwrap_or("").to_owned(),
+        channel_type: event["channel_type"].as_str().unwrap_or("").to_owned(),
+    })
 }

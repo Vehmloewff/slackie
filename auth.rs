@@ -5,7 +5,7 @@ use crate::{
     slack::{Auth, Slack},
 };
 use error_stack::{Report, ResultExt};
-pub(crate) async fn setup() -> Result<()> {
+pub async fn setup() -> Result<()> {
     println!("Choose a setup mode:\n");
     println!("  1. app            create a Slack app; the bot reads what it is invited to");
     println!("  2. impersonation  use your own Slack session; slackie acts as you");
